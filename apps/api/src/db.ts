@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 import { appConfig } from './config.js';
 import { toIsoString } from './utils.js';
@@ -8,7 +9,7 @@ export interface MailboxRecord {
   localPart: string;
   domain: string;
   createdAt: string;
-  expiresAt: string;
+  expiresAt: string | null;
   lastAccessed: string;
 }
 
@@ -87,7 +88,7 @@ function mapMailbox(row: any): MailboxRecord {
     localPart: row.localPart,
     domain: row.domain,
     createdAt: toIsoString(row.createdAt),
-    expiresAt: toIsoString(row.expiresAt),
+    expiresAt: row.expiresAt ? toIsoString(row.expiresAt) : null,
     lastAccessed: toIsoString(row.lastAccessed)
   };
 }
@@ -130,8 +131,10 @@ export async function migrate(): Promise<void> {
       local_part TEXT NOT NULL,
       domain TEXT NOT NULL,
       access_token_hash TEXT NOT NULL,
+      share_token_hash TEXT,
+      share_created_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      expires_at TIMESTAMPTZ NOT NULL,
+      expires_at TIMESTAMPTZ,
       last_accessed TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
@@ -168,6 +171,19 @@ export async function migrate(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_messages_mailbox_received ON messages(mailbox_id, received_at DESC);
     CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
   `);
+
+  await pool.query(`
+    ALTER TABLE mailboxes
+      ADD COLUMN IF NOT EXISTS share_token_hash TEXT,
+      ADD COLUMN IF NOT EXISTS share_created_at TIMESTAMPTZ;
+
+    ALTER TABLE mailboxes
+      ALTER COLUMN expires_at DROP NOT NULL;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_mailboxes_share_token_hash
+      ON mailboxes(share_token_hash)
+      WHERE share_token_hash IS NOT NULL;
+  `);
 }
 
 export async function closePool(): Promise<void> {
@@ -179,12 +195,19 @@ export async function createMailbox(input: {
   localPart: string;
   domain: string;
   tokenHash: string;
-  ttlHours: number;
+  ttlHours: number | null;
 }): Promise<MailboxRecord> {
   const result = await pool.query(
     `
       INSERT INTO mailboxes (id, address, local_part, domain, access_token_hash, expires_at)
-      VALUES ($1, $2, $3, $4, $5, now() + ($6 * interval '1 hour'))
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        CASE WHEN $6::integer IS NULL THEN NULL ELSE now() + ($6::integer * interval '1 hour') END
+      )
       RETURNING ${mailboxSelect}
     `,
     [cryptoRandomId(), input.address, input.localPart, input.domain, input.tokenHash, input.ttlHours]
@@ -198,7 +221,7 @@ export async function getActiveMailboxByAddress(address: string): Promise<Mailbo
     `
       UPDATE mailboxes
       SET last_accessed = now()
-      WHERE address = $1 AND expires_at > now()
+      WHERE address = $1 AND (expires_at IS NULL OR expires_at > now())
       RETURNING ${mailboxSelect}
     `,
     [address]
@@ -212,10 +235,33 @@ export async function getMailboxForAccess(address: string, tokenHash: string): P
     `
       UPDATE mailboxes
       SET last_accessed = now()
-      WHERE address = $1 AND access_token_hash = $2 AND expires_at > now()
+      WHERE address = $1 AND access_token_hash = $2 AND (expires_at IS NULL OR expires_at > now())
       RETURNING ${mailboxSelect}
     `,
     [address, tokenHash]
+  );
+
+  return result.rows[0] ? mapMailbox(result.rows[0]) : null;
+}
+
+export async function updateMailboxRetention(
+  address: string,
+  tokenHash: string,
+  ttlHours: number | null
+): Promise<MailboxRecord | null> {
+  const result = await pool.query(
+    `
+      UPDATE mailboxes
+      SET
+        expires_at = CASE
+          WHEN $3::integer IS NULL THEN NULL
+          ELSE now() + ($3::integer * interval '1 hour')
+        END,
+        last_accessed = now()
+      WHERE address = $1 AND access_token_hash = $2 AND (expires_at IS NULL OR expires_at > now())
+      RETURNING ${mailboxSelect}
+    `,
+    [address, tokenHash, ttlHours]
   );
 
   return result.rows[0] ? mapMailbox(result.rows[0]) : null;
@@ -228,6 +274,52 @@ export async function deleteMailboxForAccess(address: string, tokenHash: string)
   );
 
   return (result.rowCount || 0) > 0;
+}
+
+export async function enableMailboxShare(
+  address: string,
+  tokenHash: string,
+  shareTokenHash: string
+): Promise<MailboxRecord | null> {
+  const result = await pool.query(
+    `
+      UPDATE mailboxes
+      SET share_token_hash = $3, share_created_at = now(), last_accessed = now()
+      WHERE address = $1 AND access_token_hash = $2 AND (expires_at IS NULL OR expires_at > now())
+      RETURNING ${mailboxSelect}
+    `,
+    [address, tokenHash, shareTokenHash]
+  );
+
+  return result.rows[0] ? mapMailbox(result.rows[0]) : null;
+}
+
+export async function disableMailboxShare(address: string, tokenHash: string): Promise<MailboxRecord | null> {
+  const result = await pool.query(
+    `
+      UPDATE mailboxes
+      SET share_token_hash = NULL, share_created_at = NULL, last_accessed = now()
+      WHERE address = $1 AND access_token_hash = $2 AND (expires_at IS NULL OR expires_at > now())
+      RETURNING ${mailboxSelect}
+    `,
+    [address, tokenHash]
+  );
+
+  return result.rows[0] ? mapMailbox(result.rows[0]) : null;
+}
+
+export async function getMailboxForShare(shareTokenHash: string): Promise<MailboxRecord | null> {
+  const result = await pool.query(
+    `
+      UPDATE mailboxes
+      SET last_accessed = now()
+      WHERE share_token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
+      RETURNING ${mailboxSelect}
+    `,
+    [shareTokenHash]
+  );
+
+  return result.rows[0] ? mapMailbox(result.rows[0]) : null;
 }
 
 export async function saveMessage(input: SaveMessageInput): Promise<MessageRecord> {
@@ -351,7 +443,7 @@ export async function getMessageForAccess(messageId: string, tokenHash: string):
       SET is_read = true
       WHERE id = $1
         AND mailbox_id IN (
-          SELECT id FROM mailboxes WHERE access_token_hash = $2 AND expires_at > now()
+          SELECT id FROM mailboxes WHERE access_token_hash = $2 AND (expires_at IS NULL OR expires_at > now())
         )
       RETURNING
         id,
@@ -375,13 +467,43 @@ export async function getMessageForAccess(messageId: string, tokenHash: string):
   return result.rows[0] ? mapMessage(result.rows[0]) : null;
 }
 
+export async function getMessageForShare(messageId: string, shareTokenHash: string): Promise<MessageRecord | null> {
+  const result = await pool.query(
+    `
+      SELECT
+        m.id,
+        m.mailbox_id AS "mailboxId",
+        m.from_address AS "fromAddress",
+        m.from_name AS "fromName",
+        m.to_address AS "toAddress",
+        m.subject,
+        left(m.text_body, 240) AS preview,
+        m.text_body AS "textBody",
+        m.html_body AS "htmlBody",
+        m.message_id AS "messageId",
+        m.size_bytes AS "sizeBytes",
+        m.received_at AS "receivedAt",
+        m.has_attachments AS "hasAttachments",
+        m.is_read AS "isRead"
+      FROM messages m
+      JOIN mailboxes b ON b.id = m.mailbox_id
+      WHERE m.id = $1
+        AND b.share_token_hash = $2
+        AND (b.expires_at IS NULL OR b.expires_at > now())
+    `,
+    [messageId, shareTokenHash]
+  );
+
+  return result.rows[0] ? mapMessage(result.rows[0]) : null;
+}
+
 export async function deleteMessageForAccess(messageId: string, tokenHash: string): Promise<boolean> {
   const result = await pool.query(
     `
       DELETE FROM messages
       WHERE id = $1
         AND mailbox_id IN (
-          SELECT id FROM mailboxes WHERE access_token_hash = $2 AND expires_at > now()
+          SELECT id FROM mailboxes WHERE access_token_hash = $2 AND (expires_at IS NULL OR expires_at > now())
         )
     `,
     [messageId, tokenHash]
@@ -399,9 +521,46 @@ export async function listAttachmentsForAccess(
       SELECT 1
       FROM messages m
       JOIN mailboxes b ON b.id = m.mailbox_id
-      WHERE m.id = $1 AND b.access_token_hash = $2 AND b.expires_at > now()
+      WHERE m.id = $1 AND b.access_token_hash = $2 AND (b.expires_at IS NULL OR b.expires_at > now())
     `,
     [messageId, tokenHash]
+  );
+
+  if (!allowed.rows[0]) return null;
+
+  const result = await pool.query(
+    `
+      SELECT
+        id,
+        message_id AS "messageId",
+        filename,
+        mime_type AS "mimeType",
+        size_bytes AS "sizeBytes",
+        created_at AS "createdAt"
+      FROM attachments
+      WHERE message_id = $1
+      ORDER BY created_at ASC
+    `,
+    [messageId]
+  );
+
+  return result.rows.map(mapAttachment);
+}
+
+export async function listAttachmentsForShare(
+  messageId: string,
+  shareTokenHash: string
+): Promise<AttachmentRecord[] | null> {
+  const allowed = await pool.query(
+    `
+      SELECT 1
+      FROM messages m
+      JOIN mailboxes b ON b.id = m.mailbox_id
+      WHERE m.id = $1
+        AND b.share_token_hash = $2
+        AND (b.expires_at IS NULL OR b.expires_at > now())
+    `,
+    [messageId, shareTokenHash]
   );
 
   if (!allowed.rows[0]) return null;
@@ -442,7 +601,7 @@ export async function getAttachmentForAccess(
       FROM attachments a
       JOIN messages m ON m.id = a.message_id
       JOIN mailboxes b ON b.id = m.mailbox_id
-      WHERE a.id = $1 AND b.access_token_hash = $2 AND b.expires_at > now()
+      WHERE a.id = $1 AND b.access_token_hash = $2 AND (b.expires_at IS NULL OR b.expires_at > now())
     `,
     [attachmentId, tokenHash]
   );
@@ -455,13 +614,43 @@ export async function getAttachmentForAccess(
   };
 }
 
+export async function getAttachmentForShare(
+  attachmentId: string,
+  shareTokenHash: string
+): Promise<AttachmentDownload | null> {
+  const result = await pool.query(
+    `
+      SELECT
+        a.id,
+        a.message_id AS "messageId",
+        a.filename,
+        a.mime_type AS "mimeType",
+        a.size_bytes AS "sizeBytes",
+        a.created_at AS "createdAt",
+        a.content
+      FROM attachments a
+      JOIN messages m ON m.id = a.message_id
+      JOIN mailboxes b ON b.id = m.mailbox_id
+      WHERE a.id = $1
+        AND b.share_token_hash = $2
+        AND (b.expires_at IS NULL OR b.expires_at > now())
+    `,
+    [attachmentId, shareTokenHash]
+  );
+
+  if (!result.rows[0]) return null;
+
+  return {
+    ...mapAttachment(result.rows[0]),
+    content: result.rows[0].content
+  };
+}
+
 export async function cleanupExpired(): Promise<{ mailboxes: number }> {
-  const result = await pool.query('DELETE FROM mailboxes WHERE expires_at <= now()');
+  const result = await pool.query('DELETE FROM mailboxes WHERE expires_at IS NOT NULL AND expires_at <= now()');
   return { mailboxes: result.rowCount || 0 };
 }
 
 function cryptoRandomId(): string {
   return crypto.randomUUID();
 }
-
-import crypto from 'node:crypto';
