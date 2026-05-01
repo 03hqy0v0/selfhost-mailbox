@@ -3,6 +3,7 @@ export interface AppConfig {
   defaultTtlHours: number;
   maxTtlHours: number;
   publicBaseUrl: string;
+  adminEnabled: boolean;
 }
 
 export interface Mailbox {
@@ -66,6 +67,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 function tokenHeader(token: string): HeadersInit {
   return {
     'X-Mailbox-Token': token
+  };
+}
+
+function adminHeader(token: string): HeadersInit {
+  return {
+    'X-Admin-Token': token
   };
 }
 
@@ -199,6 +206,52 @@ export async function listAttachments(id: string, token: string): Promise<Attach
 export async function downloadAttachment(attachment: AttachmentRecord, token: string): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/attachments/${attachment.id}/download`, {
     headers: tokenHeader(token)
+  });
+
+  await downloadBlob(response, attachment.filename);
+}
+
+export async function listAdminMailboxes(adminToken: string): Promise<Mailbox[]> {
+  const result = await request<{ success: true; mailboxes: Mailbox[] }>('/api/admin/mailboxes', {
+    headers: adminHeader(adminToken)
+  });
+
+  return result.mailboxes;
+}
+
+export async function listAdminMessages(address: string, adminToken: string): Promise<MessageListItem[]> {
+  const result = await request<{ success: true; messages: MessageListItem[] }>(
+    `/api/admin/mailboxes/${encodeURIComponent(address)}/messages`,
+    {
+      headers: adminHeader(adminToken)
+    }
+  );
+
+  return result.messages;
+}
+
+export async function getAdminMessage(id: string, adminToken: string): Promise<MessageRecord> {
+  const result = await request<{ success: true; message: MessageRecord }>(`/api/admin/messages/${id}`, {
+    headers: adminHeader(adminToken)
+  });
+
+  return result.message;
+}
+
+export async function listAdminAttachments(id: string, adminToken: string): Promise<AttachmentRecord[]> {
+  const result = await request<{ success: true; attachments: AttachmentRecord[] }>(
+    `/api/admin/messages/${id}/attachments`,
+    {
+      headers: adminHeader(adminToken)
+    }
+  );
+
+  return result.attachments;
+}
+
+export async function downloadAdminAttachment(attachment: AttachmentRecord, adminToken: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/admin/attachments/${attachment.id}/download`, {
+    headers: adminHeader(adminToken)
   });
 
   await downloadBlob(response, attachment.filename);

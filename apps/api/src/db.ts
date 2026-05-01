@@ -170,6 +170,11 @@ export async function migrate(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_mailboxes_expires_at ON mailboxes(expires_at);
     CREATE INDEX IF NOT EXISTS idx_messages_mailbox_received ON messages(mailbox_id, received_at DESC);
     CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
+
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      id TEXT PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
   `);
 
   await pool.query(`
@@ -184,6 +189,19 @@ export async function migrate(): Promise<void> {
       ON mailboxes(share_token_hash)
       WHERE share_token_hash IS NOT NULL;
   `);
+
+  const preserveExisting = await pool.query(
+    `
+      INSERT INTO schema_migrations (id)
+      VALUES ('preserve-existing-mailboxes-2026-05-01')
+      ON CONFLICT (id) DO NOTHING
+      RETURNING id
+    `
+  );
+
+  if ((preserveExisting.rowCount || 0) > 0) {
+    await pool.query('UPDATE mailboxes SET expires_at = NULL WHERE expires_at IS NOT NULL');
+  }
 }
 
 export async function closePool(): Promise<void> {
@@ -223,6 +241,31 @@ export async function getActiveMailboxByAddress(address: string): Promise<Mailbo
       SET last_accessed = now()
       WHERE address = $1 AND (expires_at IS NULL OR expires_at > now())
       RETURNING ${mailboxSelect}
+    `,
+    [address]
+  );
+
+  return result.rows[0] ? mapMailbox(result.rows[0]) : null;
+}
+
+export async function listMailboxes(): Promise<MailboxRecord[]> {
+  const result = await pool.query(
+    `
+      SELECT ${mailboxSelect}
+      FROM mailboxes
+      ORDER BY created_at DESC
+    `
+  );
+
+  return result.rows.map(mapMailbox);
+}
+
+export async function getMailboxByAddress(address: string): Promise<MailboxRecord | null> {
+  const result = await pool.query(
+    `
+      SELECT ${mailboxSelect}
+      FROM mailboxes
+      WHERE address = $1
     `,
     [address]
   );
@@ -497,6 +540,33 @@ export async function getMessageForShare(messageId: string, shareTokenHash: stri
   return result.rows[0] ? mapMessage(result.rows[0]) : null;
 }
 
+export async function getMessageById(messageId: string): Promise<MessageRecord | null> {
+  const result = await pool.query(
+    `
+      SELECT
+        id,
+        mailbox_id AS "mailboxId",
+        from_address AS "fromAddress",
+        from_name AS "fromName",
+        to_address AS "toAddress",
+        subject,
+        left(text_body, 240) AS preview,
+        text_body AS "textBody",
+        html_body AS "htmlBody",
+        message_id AS "messageId",
+        size_bytes AS "sizeBytes",
+        received_at AS "receivedAt",
+        has_attachments AS "hasAttachments",
+        is_read AS "isRead"
+      FROM messages
+      WHERE id = $1
+    `,
+    [messageId]
+  );
+
+  return result.rows[0] ? mapMessage(result.rows[0]) : null;
+}
+
 export async function deleteMessageForAccess(messageId: string, tokenHash: string): Promise<boolean> {
   const result = await pool.query(
     `
@@ -584,6 +654,29 @@ export async function listAttachmentsForShare(
   return result.rows.map(mapAttachment);
 }
 
+export async function listAttachmentsByMessageId(messageId: string): Promise<AttachmentRecord[] | null> {
+  const allowed = await pool.query('SELECT 1 FROM messages WHERE id = $1', [messageId]);
+  if (!allowed.rows[0]) return null;
+
+  const result = await pool.query(
+    `
+      SELECT
+        id,
+        message_id AS "messageId",
+        filename,
+        mime_type AS "mimeType",
+        size_bytes AS "sizeBytes",
+        created_at AS "createdAt"
+      FROM attachments
+      WHERE message_id = $1
+      ORDER BY created_at ASC
+    `,
+    [messageId]
+  );
+
+  return result.rows.map(mapAttachment);
+}
+
 export async function getAttachmentForAccess(
   attachmentId: string,
   tokenHash: string
@@ -636,6 +729,31 @@ export async function getAttachmentForShare(
         AND (b.expires_at IS NULL OR b.expires_at > now())
     `,
     [attachmentId, shareTokenHash]
+  );
+
+  if (!result.rows[0]) return null;
+
+  return {
+    ...mapAttachment(result.rows[0]),
+    content: result.rows[0].content
+  };
+}
+
+export async function getAttachmentById(attachmentId: string): Promise<AttachmentDownload | null> {
+  const result = await pool.query(
+    `
+      SELECT
+        id,
+        message_id AS "messageId",
+        filename,
+        mime_type AS "mimeType",
+        size_bytes AS "sizeBytes",
+        created_at AS "createdAt",
+        content
+      FROM attachments
+      WHERE id = $1
+    `,
+    [attachmentId]
   );
 
   if (!result.rows[0]) return null;

@@ -5,6 +5,7 @@ import {
   Download,
   ExternalLink,
   Inbox,
+  KeyRound,
   Link2,
   Mail,
   MailPlus,
@@ -28,13 +29,18 @@ import {
   deleteMailbox,
   deleteMessage,
   disableMailboxShare,
+  downloadAdminAttachment,
   downloadAttachment,
   downloadSharedAttachment,
+  getAdminMessage,
   getConfig,
   getMailbox,
   getMessage,
   getSharedMailbox,
   getSharedMessage,
+  listAdminAttachments,
+  listAdminMailboxes,
+  listAdminMessages,
   listAttachments,
   listMessages,
   listSharedAttachments,
@@ -46,6 +52,13 @@ interface StoredMailbox {
   mailbox: Mailbox;
   token: string;
   share?: ShareInfo;
+}
+
+interface VisibleMailbox {
+  mailbox: Mailbox;
+  token?: string;
+  share?: ShareInfo;
+  source: 'owned' | 'admin';
 }
 
 interface MessagePaneProps {
@@ -68,6 +81,7 @@ interface ReaderProps {
 const MAILBOXES_STORAGE_KEY = 'selfhost-mailbox.mailboxes.v1';
 const ACTIVE_STORAGE_KEY = 'selfhost-mailbox.active.v1';
 const LEGACY_STORAGE_KEY = 'selfhost-mailbox.current';
+const ADMIN_TOKEN_STORAGE_KEY = 'selfhost-mailbox.admin-token.v1';
 
 function isMailboxActive(mailbox: Mailbox): boolean {
   return !mailbox.expiresAt || new Date(mailbox.expiresAt).getTime() > Date.now();
@@ -123,6 +137,19 @@ function writeActiveAddress(value: string): void {
   localStorage.setItem(ACTIVE_STORAGE_KEY, value);
 }
 
+function readAdminToken(): string {
+  return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '';
+}
+
+function writeAdminToken(value: string): void {
+  if (!value) {
+    localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    return;
+  }
+
+  localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, value);
+}
+
 function initialActiveAddress(mailboxes: StoredMailbox[]): string {
   const saved = localStorage.getItem(ACTIVE_STORAGE_KEY);
   if (saved && mailboxes.some((item) => item.mailbox.address === saved)) return saved;
@@ -134,6 +161,17 @@ function upsertMailbox(mailboxes: StoredMailbox[], next: StoredMailbox): StoredM
   if (existing === -1) return [next, ...mailboxes];
 
   return mailboxes.map((item, index) => (index === existing ? { ...item, ...next } : item));
+}
+
+function currentShareUrl(token: string): string {
+  return `${window.location.origin.replace(/\/+$/, '')}/share/${encodeURIComponent(token)}`;
+}
+
+function normalizeShare(share: ShareInfo): ShareInfo {
+  return {
+    token: share.token,
+    url: currentShareUrl(share.token)
+  };
 }
 
 function formatTime(value: string): string {
@@ -209,21 +247,40 @@ function MailboxDashboard() {
   const [domain, setDomain] = useState('');
   const [ttlHours, setTtlHours] = useState(24);
   const [permanent, setPermanent] = useState(true);
+  const [adminToken, setAdminToken] = useState(() => readAdminToken());
+  const [adminInput, setAdminInput] = useState(() => readAdminToken());
+  const [adminMailboxes, setAdminMailboxes] = useState<Mailbox[]>([]);
   const [messages, setMessages] = useState<MessageListItem[]>([]);
   const [selected, setSelected] = useState<MessageRecord | null>(null);
   const [attachments, setAttachments] = useState<AttachmentRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [messageLoading, setMessageLoading] = useState(false);
   const [shareLoading, setShareLoading] = useState(false);
+  const [adminLoading, setAdminLoading] = useState(false);
   const [query, setQuery] = useState('');
   const [notice, setNotice] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
+  const visibleMailboxes = useMemo<VisibleMailbox[]>(() => {
+    const owned = storedMailboxes.map((item) => ({ ...item, source: 'owned' as const }));
+    const ownedAddresses = new Set(owned.map((item) => item.mailbox.address));
+    const adminOnly = adminMailboxes
+      .filter((mailbox) => !ownedAddresses.has(mailbox.address))
+      .map((mailbox) => ({ mailbox, source: 'admin' as const }));
+
+    return [...owned, ...adminOnly];
+  }, [adminMailboxes, storedMailboxes]);
+
   const activeStored = useMemo(
-    () => storedMailboxes.find((item) => item.mailbox.address === activeAddress) || storedMailboxes[0] || null,
+    () => storedMailboxes.find((item) => item.mailbox.address === activeAddress) || null,
     [activeAddress, storedMailboxes]
   );
-  const mailbox = activeStored?.mailbox || null;
+  const activeVisible = useMemo(
+    () => visibleMailboxes.find((item) => item.mailbox.address === activeAddress) || visibleMailboxes[0] || null,
+    [activeAddress, visibleMailboxes]
+  );
+  const mailbox = activeVisible?.mailbox || null;
   const token = activeStored?.token || '';
+  const activeShare = activeStored?.share ? normalizeShare(activeStored.share) : null;
 
   const filteredMessages = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -273,8 +330,52 @@ function MailboxDashboard() {
     [showNotice]
   );
 
+  const loadAdminMailboxList = useCallback(
+    async (tokenValue = adminInput, announce = true) => {
+      const nextToken = tokenValue.trim();
+      if (!nextToken) {
+        showNotice('error', '请输入管理密钥');
+        return;
+      }
+
+      setAdminLoading(true);
+      setNotice(null);
+      try {
+        const next = await listAdminMailboxes(nextToken);
+        setAdminToken(nextToken);
+        setAdminInput(nextToken);
+        setAdminMailboxes(next);
+        writeAdminToken(nextToken);
+
+        const localAddresses = new Set(storedMailboxes.map((item) => item.mailbox.address));
+        const hasActive =
+          !!activeAddress &&
+          (localAddresses.has(activeAddress) || next.some((item) => item.address === activeAddress));
+        if (!hasActive && next[0]) {
+          setActiveAddress(next[0].address);
+          writeActiveAddress(next[0].address);
+        }
+
+        if (announce) showNotice('success', `已加载 ${next.length} 个服务器邮箱`);
+      } catch (err) {
+        showNotice('error', err instanceof Error ? err.message : '服务器邮箱加载失败');
+      } finally {
+        setAdminLoading(false);
+      }
+    },
+    [activeAddress, adminInput, showNotice, storedMailboxes]
+  );
+
+  function handleDisconnectAdmin() {
+    setAdminToken('');
+    setAdminInput('');
+    setAdminMailboxes([]);
+    writeAdminToken('');
+    showNotice('success', '已退出服务器同步');
+  }
+
   const refreshMessages = useCallback(async () => {
-    if (!activeStored) {
+    if (!mailbox) {
       setMessages([]);
       return;
     }
@@ -282,14 +383,16 @@ function MailboxDashboard() {
     setLoading(true);
     setNotice(null);
     try {
-      const next = await listMessages(activeStored.mailbox.address, activeStored.token);
+      const next = token
+        ? await listMessages(mailbox.address, token)
+        : await listAdminMessages(mailbox.address, adminToken);
       setMessages(next);
     } catch (err) {
       showNotice('error', err instanceof Error ? err.message : '刷新失败');
     } finally {
       setLoading(false);
     }
-  }, [activeStored, showNotice]);
+  }, [adminToken, mailbox, showNotice, token]);
 
   useEffect(() => {
     void getConfig()
@@ -300,6 +403,11 @@ function MailboxDashboard() {
       })
       .catch((err) => showNotice('error', err instanceof Error ? err.message : '配置加载失败'));
   }, [showNotice]);
+
+  useEffect(() => {
+    if (!config?.adminEnabled || !adminToken) return;
+    void loadAdminMailboxList(adminToken, false);
+  }, [config?.adminEnabled]);
 
   useEffect(() => {
     if (storedMailboxes.length === 0) return;
@@ -359,20 +467,24 @@ function MailboxDashboard() {
   }
 
   async function handleSelectMessage(message: MessageListItem) {
-    if (!token) return;
+    if (!token && !adminToken) return;
 
     setMessageLoading(true);
     setNotice(null);
     try {
-      const [detail, files] = await Promise.all([
-        getMessage(message.id, token),
-        listAttachments(message.id, token)
-      ]);
+      const [detail, files] = token
+        ? await Promise.all([getMessage(message.id, token), listAttachments(message.id, token)])
+        : await Promise.all([
+            getAdminMessage(message.id, adminToken),
+            listAdminAttachments(message.id, adminToken)
+          ]);
       setSelected(detail);
       setAttachments(files);
-      setMessages((current) =>
-        current.map((item) => (item.id === message.id ? { ...item, isRead: true } : item))
-      );
+      if (token) {
+        setMessages((current) =>
+          current.map((item) => (item.id === message.id ? { ...item, isRead: true } : item))
+        );
+      }
     } catch (err) {
       showNotice('error', err instanceof Error ? err.message : '邮件加载失败');
     } finally {
@@ -421,10 +533,10 @@ function MailboxDashboard() {
       const nextStored: StoredMailbox = {
         mailbox: result.mailbox,
         token,
-        share: result.share
+        share: normalizeShare(result.share)
       };
       commitMailboxes(upsertMailbox(storedMailboxes, nextStored), result.mailbox.address);
-      const copied = await copyText(result.share.url, '分享链接', false);
+      const copied = await copyText(currentShareUrl(result.share.token), '分享链接', false);
       if (!copied) showNotice('success', '分享链接已生成，可点击复制按钮复制');
     } catch (err) {
       showNotice('error', err instanceof Error ? err.message : '分享失败');
@@ -485,7 +597,7 @@ function MailboxDashboard() {
         unreadCount={unreadCount}
         loading={loading}
         onRefresh={refreshMessages}
-        onDelete={handleDeleteMailbox}
+        onDelete={token ? handleDeleteMailbox : undefined}
       />
 
       {notice ? <div className={`notice ${notice.type}`}>{notice.text}</div> : null}
@@ -547,15 +659,50 @@ function MailboxDashboard() {
             </button>
           </form>
 
+          {config?.adminEnabled ? (
+            <section className="panel admin-panel">
+              <div className="panel-title">
+                <KeyRound size={18} />
+                <h2>服务器同步</h2>
+              </div>
+              <label>
+                <span>管理密钥</span>
+                <input
+                  type="password"
+                  value={adminInput}
+                  onChange={(event) => setAdminInput(event.target.value)}
+                  placeholder="ADMIN_TOKEN"
+                  autoComplete="off"
+                />
+              </label>
+              <div className="admin-actions">
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() => void loadAdminMailboxList(adminInput)}
+                  disabled={adminLoading}
+                >
+                  <RefreshCw size={16} />
+                  {adminToken ? '刷新列表' : '加载邮箱'}
+                </button>
+                {adminToken ? (
+                  <button className="secondary" type="button" onClick={handleDisconnectAdmin}>
+                    退出
+                  </button>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+
           <section className="panel mailbox-panel">
             <div className="panel-title">
               <Users size={18} />
               <h2>地址管理</h2>
-              <span className="count-pill">{storedMailboxes.length}</span>
+              <span className="count-pill">{visibleMailboxes.length}</span>
             </div>
 
             <div className="mailbox-stack">
-              {storedMailboxes.map((item) => (
+              {visibleMailboxes.map((item) => (
                 <button
                   key={item.mailbox.address}
                   className={`mailbox-card ${item.mailbox.address === mailbox?.address ? 'active' : ''}`}
@@ -567,13 +714,13 @@ function MailboxDashboard() {
                   </span>
                   <span className="mailbox-text">
                     <strong>{item.mailbox.address}</strong>
-                    <small>{mailboxLifeLabel(item.mailbox)}</small>
+                    <small>{item.source === 'admin' ? `服务器同步 · ${mailboxLifeLabel(item.mailbox)}` : mailboxLifeLabel(item.mailbox)}</small>
                   </span>
                   {item.share ? <Link2 size={15} /> : null}
                 </button>
               ))}
 
-              {storedMailboxes.length === 0 ? <div className="empty compact">暂无邮箱</div> : null}
+              {visibleMailboxes.length === 0 ? <div className="empty compact">暂无邮箱</div> : null}
             </div>
           </section>
 
@@ -592,27 +739,29 @@ function MailboxDashboard() {
                   <Copy size={16} />
                   复制地址
                 </button>
-                <button className="secondary" type="button" onClick={handleCreateShare} disabled={shareLoading}>
+                <button className="secondary" type="button" onClick={handleCreateShare} disabled={shareLoading || !token}>
                   <Link2 size={16} />
-                  {activeStored?.share ? '更新链接' : '生成链接'}
+                  {activeShare ? '更新链接' : '生成链接'}
                 </button>
               </div>
 
-              {mailbox.expiresAt ? (
+              {!token ? <p className="panel-hint">这是服务器同步邮箱，可查看历史邮件；生成分享和删除需要本浏览器保存过该邮箱 token。</p> : null}
+
+              {mailbox.expiresAt && token ? (
                 <button className="secondary stretch" type="button" onClick={handleKeepMailbox} disabled={shareLoading}>
                   <Archive size={16} />
                   设为长期
                 </button>
               ) : null}
 
-              {activeStored?.share ? (
+              {activeShare ? (
                 <div className="share-link-row">
-                  <input value={activeStored.share.url} readOnly aria-label="分享链接" />
+                  <input value={activeShare.url} readOnly aria-label="分享链接" />
                   <button
                     className="icon-button"
                     type="button"
                     title="复制分享链接"
-                    onClick={() => void copyText(activeStored.share?.url || '', '分享链接')}
+                    onClick={() => void copyText(activeShare.url, '分享链接')}
                   >
                     <Copy size={16} />
                   </button>
@@ -620,7 +769,7 @@ function MailboxDashboard() {
                     className="icon-button"
                     type="button"
                     title="打开分享链接"
-                    onClick={() => window.open(activeStored.share?.url, '_blank', 'noopener,noreferrer')}
+                    onClick={() => window.open(activeShare.url, '_blank', 'noopener,noreferrer')}
                   >
                     <ExternalLink size={16} />
                   </button>
@@ -663,9 +812,11 @@ function MailboxDashboard() {
           selected={selected}
           attachments={attachments}
           loading={messageLoading}
-          canDelete
           onDelete={(id) => void handleDeleteMessage(id)}
-          onDownload={(attachment) => void downloadAttachment(attachment, token)}
+          canDelete={Boolean(token)}
+          onDownload={(attachment) =>
+            void (token ? downloadAttachment(attachment, token) : downloadAdminAttachment(attachment, adminToken))
+          }
         />
       </section>
     </main>

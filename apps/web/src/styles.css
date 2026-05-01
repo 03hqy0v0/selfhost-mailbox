@@ -189,7 +189,8 @@ button:disabled {
   font-size: 12px;
 }
 
-.compose-panel label {
+.compose-panel label,
+.admin-panel label {
   display: grid;
   gap: 7px;
   margin-bottom: 12px;
@@ -389,6 +390,19 @@ select:focus {
   display: grid;
   grid-template-columns: 1fr 1fr;
   margin-bottom: 10px;
+}
+
+.admin-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.panel-hint {
+  margin: 0 0 10px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .share-link-row {
@@ -659,6 +673,7 @@ pre {
   }
 
   .address-row,
+  .admin-actions,
   .share-actions,
   .share-link-row {
     grid-template-columns: 1fr;

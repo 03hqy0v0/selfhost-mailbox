@@ -28,6 +28,7 @@
 - 多邮箱管理：同一个浏览器会保存已创建邮箱的 token，可以在侧栏切换地址，创建新地址不会覆盖旧地址。
 - 长期保存：创建邮箱时可选择“长期”，数据库里的 `expires_at` 会置空，清理任务不会删除这个邮箱及其邮件。
 - 只读分享：管理界面可为某个邮箱生成 `/share/<token>` 链接，对方只能查看这个邮箱的收件箱、邮件正文和附件，不能创建、删除或进入管理功能。
+- 服务器同步：设置 `ADMIN_TOKEN` 后，新浏览器或新域名页面也可以用管理密钥加载服务器里已有邮箱和历史邮件。
 
 ## 本地开发
 
@@ -62,6 +63,7 @@ npm run dev:web
 ```env
 EMAIL_DOMAINS=example.com,example.net
 PUBLIC_BASE_URL=https://mail.example.com
+ADMIN_TOKEN=replace-with-a-long-random-secret
 SMTP_PUBLISH_PORT=25
 HTTP_PUBLISH_PORT=3000
 POSTGRES_USER=mailbox
@@ -131,6 +133,11 @@ swaks --server 127.0.0.1:2525 --to test@example.com --from sender@example.org --
 - `DELETE /api/messages/:id`
 - `GET /api/messages/:id/attachments`
 - `GET /api/attachments/:id/download`
+- `GET /api/admin/mailboxes`
+- `GET /api/admin/mailboxes/:address/messages`
+- `GET /api/admin/messages/:id`
+- `GET /api/admin/messages/:id/attachments`
+- `GET /api/admin/attachments/:id/download`
 - `GET /api/shared/:shareToken/mailbox`
 - `GET /api/shared/:shareToken/messages`
 - `GET /api/shared/:shareToken/messages/:id`
@@ -144,3 +151,11 @@ X-Mailbox-Token: <token>
 ```
 
 分享接口会返回 `share.url`。分享 token 单独存储哈希，不等同于邮箱管理 token。
+
+管理接口需要请求头：
+
+```http
+X-Admin-Token: <ADMIN_TOKEN>
+```
+
+`ADMIN_TOKEN` 适合设置成一段长随机字符串。它不会暴露给分享页；只有输入该密钥的管理界面可以跨浏览器加载服务器里的历史邮箱。

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 
 function parseInteger(name: string, fallback: number): number {
@@ -30,6 +31,12 @@ function optionalReadableFile(name: string): string | undefined {
   return value;
 }
 
+function optionalTokenHash(name: string): string | undefined {
+  const value = process.env[name];
+  if (!value) return undefined;
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
 export const appConfig = {
   databaseUrl: process.env.DATABASE_URL || 'postgres://mailbox:mailbox@localhost:5432/mailbox',
   emailDomains: parseDomains(process.env.EMAIL_DOMAINS),
@@ -42,6 +49,7 @@ export const appConfig = {
   defaultTtlHours: parseInteger('DEFAULT_TTL_HOURS', 24),
   maxTtlHours: parseInteger('MAX_TTL_HOURS', 168),
   maxMessageBytes: parseInteger('MAX_MESSAGE_BYTES', 25 * 1024 * 1024),
+  adminTokenHash: optionalTokenHash('ADMIN_TOKEN'),
   webDist: process.env.WEB_DIST,
   smtpTlsKeyPath: optionalReadableFile('SMTP_TLS_KEY_PATH'),
   smtpTlsCertPath: optionalReadableFile('SMTP_TLS_CERT_PATH')

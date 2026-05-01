@@ -12,12 +12,17 @@ import {
   enableMailboxShare,
   getAttachmentForAccess,
   getAttachmentForShare,
+  getAttachmentById,
+  getMailboxByAddress,
   getMailboxForAccess,
   getMailboxForShare,
+  getMessageById,
   getMessageForAccess,
   getMessageForShare,
+  listAttachmentsByMessageId,
   listAttachmentsForAccess,
   listAttachmentsForShare,
+  listMailboxes,
   listMessages,
   updateMailboxRetention
 } from './db.js';
@@ -47,7 +52,14 @@ interface UpdateMailboxBody {
 }
 
 function tokenFromRequest(request: FastifyRequest): string | null {
-  const header = request.headers['x-mailbox-token'];
+  return singleHeaderValue(request.headers['x-mailbox-token']);
+}
+
+function adminTokenFromRequest(request: FastifyRequest): string | null {
+  return singleHeaderValue(request.headers['x-admin-token']);
+}
+
+function singleHeaderValue(header: string | string[] | undefined): string | null {
   if (Array.isArray(header)) return header[0] || null;
   return header || null;
 }
@@ -60,6 +72,21 @@ function requireToken(request: FastifyRequest, reply: FastifyReply): string | nu
   }
 
   return hashToken(token);
+}
+
+function requireAdminToken(request: FastifyRequest, reply: FastifyReply): boolean {
+  if (!appConfig.adminTokenHash) {
+    void reply.code(503).send({ success: false, error: 'Admin token is not configured' });
+    return false;
+  }
+
+  const token = adminTokenFromRequest(request);
+  if (!token || hashToken(token) !== appConfig.adminTokenHash) {
+    void reply.code(401).send({ success: false, error: 'Invalid admin token' });
+    return false;
+  }
+
+  return true;
 }
 
 function isAllowedDomain(domain: string): boolean {
@@ -76,8 +103,42 @@ function retentionTtlHours(body: UpdateMailboxBody): number | null {
   return parseTtlHours(body.ttlHours, appConfig.defaultTtlHours, appConfig.maxTtlHours);
 }
 
-function shareUrl(token: string): string {
-  return `${appConfig.publicBaseUrl.replace(/\/+$/, '')}/share/${encodeURIComponent(token)}`;
+function shareUrl(token: string, request: FastifyRequest): string {
+  return `${publicBaseUrlForRequest(request)}/share/${encodeURIComponent(token)}`;
+}
+
+function publicBaseUrlForRequest(request: FastifyRequest): string {
+  const configured = appConfig.publicBaseUrl.replace(/\/+$/, '');
+  if (configured && isPublicBaseUrl(configured)) {
+    return configured;
+  }
+
+  const host =
+    singleHeaderValue(request.headers['x-forwarded-host']) ||
+    singleHeaderValue(request.headers.host) ||
+    'localhost';
+  const cfVisitor = singleHeaderValue(request.headers['cf-visitor']);
+  const cfScheme = cfVisitor?.match(/"scheme"\s*:\s*"([^"]+)"/)?.[1];
+  const proto =
+    singleHeaderValue(request.headers['x-forwarded-proto']) ||
+    cfScheme ||
+    (host.includes('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https');
+
+  return `${proto}://${host}`.replace(/\/+$/, '');
+}
+
+function isPublicBaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return !(
+      url.hostname === 'localhost' ||
+      url.hostname === '127.0.0.1' ||
+      url.hostname === '0.0.0.0' ||
+      /^\d{1,3}(?:\.\d{1,3}){3}$/.test(url.hostname)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function resolveMailboxAddress(body: CreateMailboxBody): { address: string; localPart: string; domain: string } {
@@ -125,7 +186,7 @@ export async function createHttpServer(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: appConfig.corsOrigin === '*' ? true : appConfig.corsOrigin,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'X-Mailbox-Token']
+    allowedHeaders: ['Content-Type', 'X-Mailbox-Token', 'X-Admin-Token']
   });
 
   app.get('/api/health', async () => ({
@@ -139,9 +200,77 @@ export async function createHttpServer(): Promise<FastifyInstance> {
       emailDomains: appConfig.emailDomains,
       defaultTtlHours: appConfig.defaultTtlHours,
       maxTtlHours: appConfig.maxTtlHours,
-      publicBaseUrl: appConfig.publicBaseUrl
+      publicBaseUrl: appConfig.publicBaseUrl,
+      adminEnabled: Boolean(appConfig.adminTokenHash)
     }
   }));
+
+  app.get('/api/admin/mailboxes', async (request, reply) => {
+    if (!requireAdminToken(request, reply)) return;
+
+    return {
+      success: true,
+      mailboxes: await listMailboxes()
+    };
+  });
+
+  app.get('/api/admin/mailboxes/:address/messages', async (request, reply) => {
+    if (!requireAdminToken(request, reply)) return;
+
+    const { address } = request.params as { address: string };
+    const mailbox = await getMailboxByAddress(normalizeAddress(address));
+    if (!mailbox) {
+      return reply.code(404).send({ success: false, error: 'Mailbox not found' });
+    }
+
+    return {
+      success: true,
+      messages: await listMessages(mailbox.id)
+    };
+  });
+
+  app.get('/api/admin/messages/:id', async (request, reply) => {
+    if (!requireAdminToken(request, reply)) return;
+
+    const { id } = request.params as { id: string };
+    const message = await getMessageById(id);
+    if (!message) {
+      return reply.code(404).send({ success: false, error: 'Message not found' });
+    }
+
+    return { success: true, message };
+  });
+
+  app.get('/api/admin/messages/:id/attachments', async (request, reply) => {
+    if (!requireAdminToken(request, reply)) return;
+
+    const { id } = request.params as { id: string };
+    const attachments = await listAttachmentsByMessageId(id);
+    if (!attachments) {
+      return reply.code(404).send({ success: false, error: 'Message not found' });
+    }
+
+    return { success: true, attachments };
+  });
+
+  app.get('/api/admin/attachments/:id/download', async (request, reply) => {
+    if (!requireAdminToken(request, reply)) return;
+
+    const { id } = request.params as { id: string };
+    const attachment = await getAttachmentById(id);
+    if (!attachment) {
+      return reply.code(404).send({ success: false, error: 'Attachment not found' });
+    }
+
+    reply.header('Content-Type', attachment.mimeType);
+    reply.header('Content-Length', attachment.content.length);
+    reply.header(
+      'Content-Disposition',
+      `attachment; filename="${safeFilename(attachment.filename)}"; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`
+    );
+
+    return reply.send(attachment.content);
+  });
 
   app.post('/api/mailboxes', async (request, reply) => {
     try {
@@ -211,7 +340,7 @@ export async function createHttpServer(): Promise<FastifyInstance> {
       mailbox,
       share: {
         token: shareToken,
-        url: shareUrl(shareToken)
+        url: shareUrl(shareToken, request)
       }
     };
   });
