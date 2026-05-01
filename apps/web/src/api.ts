@@ -11,6 +11,7 @@ export interface Mailbox {
   address: string;
   localPart: string;
   domain: string;
+  note: string;
   createdAt: string;
   expiresAt: string | null;
   lastAccessed: string;
@@ -159,6 +160,22 @@ export async function updateMailboxRetention(
   return result.mailbox;
 }
 
+export async function updateMailboxNote(address: string, token: string, note: string): Promise<Mailbox> {
+  const result = await request<{ success: true; mailbox: Mailbox }>(
+    `/api/mailboxes/${encodeURIComponent(address)}`,
+    {
+      method: 'PATCH',
+      headers: {
+        ...tokenHeader(token),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ note })
+    }
+  );
+
+  return result.mailbox;
+}
+
 export async function deleteMailbox(address: string, token: string): Promise<void> {
   await request(`/api/mailboxes/${encodeURIComponent(address)}`, {
     method: 'DELETE',
@@ -228,6 +245,22 @@ export async function listAdminMessages(address: string, adminToken: string): Pr
   );
 
   return result.messages;
+}
+
+export async function updateAdminMailboxNote(address: string, adminToken: string, note: string): Promise<Mailbox> {
+  const result = await request<{ success: true; mailbox: Mailbox }>(
+    `/api/admin/mailboxes/${encodeURIComponent(address)}`,
+    {
+      method: 'PATCH',
+      headers: {
+        ...adminHeader(adminToken),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ note })
+    }
+  );
+
+  return result.mailbox;
 }
 
 export async function getAdminMessage(id: string, adminToken: string): Promise<MessageRecord> {

@@ -24,6 +24,8 @@ import {
   listAttachmentsForShare,
   listMailboxes,
   listMessages,
+  updateMailboxNoteForAccess,
+  updateMailboxNoteForAdmin,
   updateMailboxRetention
 } from './db.js';
 import {
@@ -49,6 +51,7 @@ interface CreateMailboxBody {
 interface UpdateMailboxBody {
   ttlHours?: number | null;
   permanent?: boolean;
+  note?: string | null;
 }
 
 function tokenFromRequest(request: FastifyRequest): string | null {
@@ -101,6 +104,23 @@ function activeTtlHours(body: CreateMailboxBody): number | null {
 function retentionTtlHours(body: UpdateMailboxBody): number | null {
   if (body.permanent) return null;
   return parseTtlHours(body.ttlHours, appConfig.defaultTtlHours, appConfig.maxTtlHours);
+}
+
+function hasRetentionUpdate(body: UpdateMailboxBody): boolean {
+  return body.permanent !== undefined || body.ttlHours !== undefined;
+}
+
+function hasNoteUpdate(body: UpdateMailboxBody): boolean {
+  return Object.prototype.hasOwnProperty.call(body, 'note');
+}
+
+function normalizeNote(note: string | null | undefined): string {
+  const value = (note || '').trim();
+  if (value.length > 80) {
+    throw new Error('Note must be 80 characters or fewer');
+  }
+
+  return value;
 }
 
 function shareUrl(token: string, request: FastifyRequest): string {
@@ -229,6 +249,23 @@ export async function createHttpServer(): Promise<FastifyInstance> {
     };
   });
 
+  app.patch('/api/admin/mailboxes/:address', async (request, reply) => {
+    if (!requireAdminToken(request, reply)) return;
+
+    try {
+      const { address } = request.params as { address: string };
+      const body = (request.body || {}) as UpdateMailboxBody;
+      const mailbox = await updateMailboxNoteForAdmin(normalizeAddress(address), normalizeNote(body.note));
+      if (!mailbox) {
+        return reply.code(404).send({ success: false, error: 'Mailbox not found' });
+      }
+
+      return { success: true, mailbox };
+    } catch (error: any) {
+      return reply.code(400).send({ success: false, error: error.message });
+    }
+  });
+
   app.get('/api/admin/messages/:id', async (request, reply) => {
     if (!requireAdminToken(request, reply)) return;
 
@@ -305,11 +342,15 @@ export async function createHttpServer(): Promise<FastifyInstance> {
     try {
       const { address } = request.params as { address: string };
       const body = (request.body || {}) as UpdateMailboxBody;
-      const mailbox = await updateMailboxRetention(
-        normalizeAddress(address),
-        tokenHash,
-        retentionTtlHours(body)
-      );
+      const normalizedAddress = normalizeAddress(address);
+      let mailbox = hasRetentionUpdate(body)
+        ? await updateMailboxRetention(normalizedAddress, tokenHash, retentionTtlHours(body))
+        : await getMailboxForAccess(normalizedAddress, tokenHash);
+
+      if (mailbox && hasNoteUpdate(body)) {
+        mailbox = await updateMailboxNoteForAccess(normalizedAddress, tokenHash, normalizeNote(body.note));
+      }
+
       if (!mailbox) {
         return reply.code(404).send({ success: false, error: 'Mailbox not found' });
       }

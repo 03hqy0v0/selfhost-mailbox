@@ -26,6 +26,7 @@
 ## 功能
 
 - 多邮箱管理：同一个浏览器会保存已创建邮箱的 token，可以在侧栏切换地址，创建新地址不会覆盖旧地址。
+- 邮箱备注：地址管理里可以给每个邮箱写简短备注，用来标记这个地址给谁或哪个服务用了。
 - 长期保存：创建邮箱时可选择“长期”，数据库里的 `expires_at` 会置空，清理任务不会删除这个邮箱及其邮件。
 - 只读分享：管理界面可为某个邮箱生成 `/share/<token>` 链接，对方只能查看这个邮箱的收件箱、邮件正文和附件，不能创建、删除或进入管理功能。
 - 服务器同步：设置 `ADMIN_TOKEN` 后，新浏览器或新域名页面也可以用管理密钥加载服务器里已有邮箱和历史邮件。
@@ -124,7 +125,7 @@ swaks --server 127.0.0.1:2525 --to test@example.com --from sender@example.org --
 - `GET /api/config`
 - `POST /api/mailboxes`，请求体可包含 `address`、`domain`、`ttlHours`、`permanent`
 - `GET /api/mailboxes/:address`
-- `PATCH /api/mailboxes/:address`，用于把已有邮箱改为长期保存或重设有效期
+- `PATCH /api/mailboxes/:address`，用于把已有邮箱改为长期保存、重设有效期或更新备注
 - `DELETE /api/mailboxes/:address`
 - `POST /api/mailboxes/:address/share`
 - `DELETE /api/mailboxes/:address/share`
@@ -134,6 +135,7 @@ swaks --server 127.0.0.1:2525 --to test@example.com --from sender@example.org --
 - `GET /api/messages/:id/attachments`
 - `GET /api/attachments/:id/download`
 - `GET /api/admin/mailboxes`
+- `PATCH /api/admin/mailboxes/:address`
 - `GET /api/admin/mailboxes/:address/messages`
 - `GET /api/admin/messages/:id`
 - `GET /api/admin/messages/:id/attachments`

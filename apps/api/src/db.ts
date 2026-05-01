@@ -8,6 +8,7 @@ export interface MailboxRecord {
   address: string;
   localPart: string;
   domain: string;
+  note: string;
   createdAt: string;
   expiresAt: string | null;
   lastAccessed: string;
@@ -76,6 +77,7 @@ const mailboxSelect = `
   address,
   local_part AS "localPart",
   domain,
+  note,
   created_at AS "createdAt",
   expires_at AS "expiresAt",
   last_accessed AS "lastAccessed"
@@ -87,6 +89,7 @@ function mapMailbox(row: any): MailboxRecord {
     address: row.address,
     localPart: row.localPart,
     domain: row.domain,
+    note: row.note || '',
     createdAt: toIsoString(row.createdAt),
     expiresAt: row.expiresAt ? toIsoString(row.expiresAt) : null,
     lastAccessed: toIsoString(row.lastAccessed)
@@ -130,6 +133,7 @@ export async function migrate(): Promise<void> {
       address TEXT NOT NULL UNIQUE,
       local_part TEXT NOT NULL,
       domain TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
       access_token_hash TEXT NOT NULL,
       share_token_hash TEXT,
       share_created_at TIMESTAMPTZ,
@@ -180,7 +184,8 @@ export async function migrate(): Promise<void> {
   await pool.query(`
     ALTER TABLE mailboxes
       ADD COLUMN IF NOT EXISTS share_token_hash TEXT,
-      ADD COLUMN IF NOT EXISTS share_created_at TIMESTAMPTZ;
+      ADD COLUMN IF NOT EXISTS share_created_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT '';
 
     ALTER TABLE mailboxes
       ALTER COLUMN expires_at DROP NOT NULL;
@@ -305,6 +310,38 @@ export async function updateMailboxRetention(
       RETURNING ${mailboxSelect}
     `,
     [address, tokenHash, ttlHours]
+  );
+
+  return result.rows[0] ? mapMailbox(result.rows[0]) : null;
+}
+
+export async function updateMailboxNoteForAccess(
+  address: string,
+  tokenHash: string,
+  note: string
+): Promise<MailboxRecord | null> {
+  const result = await pool.query(
+    `
+      UPDATE mailboxes
+      SET note = $3, last_accessed = now()
+      WHERE address = $1 AND access_token_hash = $2 AND (expires_at IS NULL OR expires_at > now())
+      RETURNING ${mailboxSelect}
+    `,
+    [address, tokenHash, note]
+  );
+
+  return result.rows[0] ? mapMailbox(result.rows[0]) : null;
+}
+
+export async function updateMailboxNoteForAdmin(address: string, note: string): Promise<MailboxRecord | null> {
+  const result = await pool.query(
+    `
+      UPDATE mailboxes
+      SET note = $2, last_accessed = now()
+      WHERE address = $1
+      RETURNING ${mailboxSelect}
+    `,
+    [address, note]
   );
 
   return result.rows[0] ? mapMailbox(result.rows[0]) : null;

@@ -1,5 +1,6 @@
 import {
   Archive,
+  Check,
   Clock3,
   Copy,
   Download,
@@ -9,12 +10,14 @@ import {
   Link2,
   Mail,
   MailPlus,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
   ShieldCheck,
   Trash2,
-  Users
+  Users,
+  X
 } from 'lucide-react';
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -45,6 +48,8 @@ import {
   listMessages,
   listSharedAttachments,
   listSharedMessages,
+  updateAdminMailboxNote,
+  updateMailboxNote,
   updateMailboxRetention
 } from './api';
 
@@ -118,6 +123,7 @@ function parseStoredMailbox(raw: string | null): StoredMailbox | null {
     const parsed = JSON.parse(raw) as StoredMailbox;
     if (!parsed.mailbox?.address || !parsed.token) return null;
     if (!isMailboxActive(parsed.mailbox)) return null;
+    parsed.mailbox.note ||= '';
     return parsed;
   } catch {
     return null;
@@ -172,6 +178,10 @@ function normalizeShare(share: ShareInfo): ShareInfo {
     token: share.token,
     url: currentShareUrl(share.token)
   };
+}
+
+function mailboxDisplayName(mailbox: Mailbox): string {
+  return mailbox.note?.trim() || mailbox.address;
 }
 
 function formatTime(value: string): string {
@@ -257,6 +267,9 @@ function MailboxDashboard() {
   const [messageLoading, setMessageLoading] = useState(false);
   const [shareLoading, setShareLoading] = useState(false);
   const [adminLoading, setAdminLoading] = useState(false);
+  const [editingNoteAddress, setEditingNoteAddress] = useState('');
+  const [noteDraft, setNoteDraft] = useState('');
+  const [noteSaving, setNoteSaving] = useState(false);
   const [query, setQuery] = useState('');
   const [notice, setNotice] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
@@ -584,6 +597,52 @@ function MailboxDashboard() {
     }
   }
 
+  function handleStartNoteEdit(item: VisibleMailbox) {
+    setEditingNoteAddress(item.mailbox.address);
+    setNoteDraft(item.mailbox.note || '');
+  }
+
+  function handleCancelNoteEdit() {
+    setEditingNoteAddress('');
+    setNoteDraft('');
+  }
+
+  async function handleSaveNote(item: VisibleMailbox) {
+    const note = noteDraft.trim();
+    if (note.length > 80) {
+      showNotice('error', '备注最多 80 个字符');
+      return;
+    }
+
+    setNoteSaving(true);
+    setNotice(null);
+    try {
+      const nextMailbox = item.token
+        ? await updateMailboxNote(item.mailbox.address, item.token, note)
+        : await updateAdminMailboxNote(item.mailbox.address, adminToken, note);
+
+      if (item.token) {
+        const nextStored: StoredMailbox = {
+          mailbox: nextMailbox,
+          token: item.token,
+          share: item.share
+        };
+        commitMailboxes(upsertMailbox(storedMailboxes, nextStored), nextMailbox.address);
+      }
+
+      setAdminMailboxes((current) =>
+        current.map((mailbox) => (mailbox.address === nextMailbox.address ? nextMailbox : mailbox))
+      );
+      setEditingNoteAddress('');
+      setNoteDraft('');
+      showNotice('success', note ? '备注已保存' : '备注已清空');
+    } catch (err) {
+      showNotice('error', err instanceof Error ? err.message : '备注保存失败');
+    } finally {
+      setNoteSaving(false);
+    }
+  }
+
   function handleSwitchMailbox(address: string) {
     setActiveAddress(address);
     writeActiveAddress(address);
@@ -702,23 +761,93 @@ function MailboxDashboard() {
             </div>
 
             <div className="mailbox-stack">
-              {visibleMailboxes.map((item) => (
-                <button
-                  key={item.mailbox.address}
-                  className={`mailbox-card ${item.mailbox.address === mailbox?.address ? 'active' : ''}`}
-                  onClick={() => handleSwitchMailbox(item.mailbox.address)}
-                  type="button"
-                >
-                  <span className="mailbox-icon">
-                    <Inbox size={17} />
-                  </span>
-                  <span className="mailbox-text">
-                    <strong>{item.mailbox.address}</strong>
-                    <small>{item.source === 'admin' ? `服务器同步 · ${mailboxLifeLabel(item.mailbox)}` : mailboxLifeLabel(item.mailbox)}</small>
-                  </span>
-                  {item.share ? <Link2 size={15} /> : null}
-                </button>
-              ))}
+              {visibleMailboxes.map((item) => {
+                const isEditing = editingNoteAddress === item.mailbox.address;
+                return (
+                  <div
+                    key={item.mailbox.address}
+                    className={`mailbox-card ${item.mailbox.address === mailbox?.address ? 'active' : ''} ${
+                      isEditing ? 'editing' : ''
+                    }`}
+                  >
+                    {isEditing ? (
+                      <>
+                        <span className="mailbox-icon">
+                          <Inbox size={17} />
+                        </span>
+                        <label className="note-editor">
+                          <span>备注</span>
+                          <input
+                            value={noteDraft}
+                            onChange={(event) => setNoteDraft(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') void handleSaveNote(item);
+                              if (event.key === 'Escape') handleCancelNoteEdit();
+                            }}
+                            maxLength={80}
+                            placeholder="例如：给客户 A 注册"
+                            autoFocus
+                          />
+                        </label>
+                        <span className="note-actions">
+                          <button
+                            className="icon-button"
+                            type="button"
+                            title="保存备注"
+                            onClick={() => void handleSaveNote(item)}
+                            disabled={noteSaving}
+                          >
+                            <Check size={16} />
+                          </button>
+                          <button
+                            className="icon-button"
+                            type="button"
+                            title="取消"
+                            onClick={handleCancelNoteEdit}
+                            disabled={noteSaving}
+                          >
+                            <X size={16} />
+                          </button>
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className="mailbox-open"
+                          onClick={() => handleSwitchMailbox(item.mailbox.address)}
+                          type="button"
+                        >
+                          <span className="mailbox-icon">
+                            <Inbox size={17} />
+                          </span>
+                          <span className="mailbox-text">
+                            <strong>{mailboxDisplayName(item.mailbox)}</strong>
+                            <small>{item.mailbox.note ? item.mailbox.address : mailboxLifeLabel(item.mailbox)}</small>
+                            {item.mailbox.note ? (
+                              <small>
+                                {item.source === 'admin'
+                                  ? `服务器同步 · ${mailboxLifeLabel(item.mailbox)}`
+                                  : mailboxLifeLabel(item.mailbox)}
+                              </small>
+                            ) : item.source === 'admin' ? (
+                              <small>服务器同步</small>
+                            ) : null}
+                          </span>
+                          {item.share ? <Link2 size={15} /> : null}
+                        </button>
+                        <button
+                          className="icon-button note-button"
+                          type="button"
+                          title="编辑备注"
+                          onClick={() => handleStartNoteEdit(item)}
+                        >
+                          <Pencil size={15} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
 
               {visibleMailboxes.length === 0 ? <div className="empty compact">暂无邮箱</div> : null}
             </div>
