@@ -167,6 +167,32 @@ function shareTokenFromPath(): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+async function copyToClipboard(value: string): Promise<void> {
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.inset = '0 auto auto 0';
+  textarea.style.width = '1px';
+  textarea.style.height = '1px';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    const copied = document.execCommand('copy');
+    if (!copied) throw new Error('copy command failed');
+  } finally {
+    textarea.remove();
+  }
+}
+
 export default function App() {
   const shareToken = useMemo(() => shareTokenFromPath(), []);
   if (shareToken) return <SharedInbox shareToken={shareToken} />;
@@ -234,12 +260,14 @@ function MailboxDashboard() {
   }, []);
 
   const copyText = useCallback(
-    async (value: string, label: string) => {
+    async (value: string, label: string, showFailure = true): Promise<boolean> => {
       try {
-        await navigator.clipboard.writeText(value);
+        await copyToClipboard(value);
         showNotice('success', `${label}已复制`);
+        return true;
       } catch {
-        showNotice('error', '复制失败，请手动复制');
+        if (showFailure) showNotice('error', '复制失败，请手动复制');
+        return false;
       }
     },
     [showNotice]
@@ -396,7 +424,8 @@ function MailboxDashboard() {
         share: result.share
       };
       commitMailboxes(upsertMailbox(storedMailboxes, nextStored), result.mailbox.address);
-      await copyText(result.share.url, '分享链接');
+      const copied = await copyText(result.share.url, '分享链接', false);
+      if (!copied) showNotice('success', '分享链接已生成，可点击复制按钮复制');
     } catch (err) {
       showNotice('error', err instanceof Error ? err.message : '分享失败');
     } finally {

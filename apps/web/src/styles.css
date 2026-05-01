@@ -127,7 +127,7 @@ button:disabled {
 
 .workspace {
   display: grid;
-  grid-template-columns: 320px minmax(340px, 430px) minmax(0, 1fr);
+  grid-template-columns: 390px minmax(360px, 460px) minmax(480px, 1fr);
   gap: 14px;
   align-items: start;
 }
@@ -218,7 +218,7 @@ select:focus {
 
 .address-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(126px, 0.76fr);
+  grid-template-columns: minmax(120px, 0.9fr) minmax(170px, 1.1fr);
   gap: 8px;
 }
 
@@ -355,7 +355,6 @@ select:focus {
   min-width: 0;
 }
 
-.mailbox-text strong,
 .mailbox-text small {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -364,6 +363,7 @@ select:focus {
 
 .mailbox-text strong {
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .mailbox-text small,
