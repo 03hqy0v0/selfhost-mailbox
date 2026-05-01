@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mailbox}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mailbox}
+      POSTGRES_DB: ${POSTGRES_DB:-mailbox}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-mailbox} -d $${POSTGRES_DB:-mailbox}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-mailbox}:${POSTGRES_PASSWORD:-mailbox}@postgres:5432/${POSTGRES_DB:-mailbox}
+      EMAIL_DOMAINS: ${EMAIL_DOMAINS:-example.com}
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: 3000
+      SMTP_HOST: 0.0.0.0
+      SMTP_PORT: 2525
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      DEFAULT_TTL_HOURS: ${DEFAULT_TTL_HOURS:-24}
+      MAX_TTL_HOURS: ${MAX_TTL_HOURS:-168}
+      MAX_MESSAGE_BYTES: ${MAX_MESSAGE_BYTES:-26214400}
+      SMTP_TLS_KEY_PATH: ${SMTP_TLS_KEY_PATH:-}
+      SMTP_TLS_CERT_PATH: ${SMTP_TLS_CERT_PATH:-}
+      WEB_DIST: /app/apps/web/dist
+    ports:
+      - "${HTTP_PUBLISH_PORT:-3000}:3000"
+      - "${SMTP_PUBLISH_PORT:-2525}:2525"
+
+volumes:
+  postgres_data:
