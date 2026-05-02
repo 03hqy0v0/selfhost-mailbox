@@ -356,6 +356,11 @@ export async function deleteMailboxForAccess(address: string, tokenHash: string)
   return (result.rowCount || 0) > 0;
 }
 
+export async function deleteMailboxByAddress(address: string): Promise<boolean> {
+  const result = await pool.query('DELETE FROM mailboxes WHERE address = $1', [address]);
+  return (result.rowCount || 0) > 0;
+}
+
 export async function enableMailboxShare(
   address: string,
   tokenHash: string,

@@ -316,7 +316,7 @@ select:focus {
 
 .mailbox-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 40px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   width: 100%;
@@ -389,6 +389,11 @@ select:focus {
   height: 34px;
   min-height: 34px;
   color: #667085;
+}
+
+.mailbox-tools {
+  display: flex;
+  gap: 6px;
 }
 
 .note-editor {

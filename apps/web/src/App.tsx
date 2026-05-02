@@ -29,6 +29,7 @@ import {
   type ShareInfo,
   createMailbox,
   createMailboxShare,
+  deleteAdminMailbox,
   deleteMailbox,
   deleteMessage,
   disableMailboxShare,
@@ -536,6 +537,52 @@ function MailboxDashboard() {
     }
   }
 
+  async function handleDeleteMailboxItem(item: VisibleMailbox) {
+    const label = item.mailbox.note ? `${item.mailbox.note} (${item.mailbox.address})` : item.mailbox.address;
+    const confirmed = window.confirm(`确定删除 ${label} 吗？这个邮箱的所有邮件和附件都会一起删除。`);
+    if (!confirmed) return;
+
+    setLoading(true);
+    setNotice(null);
+    try {
+      if (item.token) {
+        await deleteMailbox(item.mailbox.address, item.token);
+      } else {
+        await deleteAdminMailbox(item.mailbox.address, adminToken);
+      }
+
+      const nextStored = storedMailboxes.filter((stored) => stored.mailbox.address !== item.mailbox.address);
+      const nextAdmin = adminMailboxes.filter((adminMailbox) => adminMailbox.address !== item.mailbox.address);
+      const nextAddress =
+        activeAddress === item.mailbox.address
+          ? nextStored[0]?.mailbox.address || nextAdmin[0]?.address || ''
+          : activeAddress;
+
+      commitMailboxes(nextStored, nextAddress);
+      setAdminMailboxes(nextAdmin);
+      if (nextAddress && !nextStored.some((stored) => stored.mailbox.address === nextAddress)) {
+        setActiveAddress(nextAddress);
+        writeActiveAddress(nextAddress);
+      }
+
+      if (activeAddress === item.mailbox.address) {
+        setMessages([]);
+        setSelected(null);
+        setAttachments([]);
+      }
+
+      if (editingNoteAddress === item.mailbox.address) {
+        handleCancelNoteEdit();
+      }
+
+      showNotice('success', '邮箱和对应邮件已删除');
+    } catch (err) {
+      showNotice('error', err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleCreateShare() {
     if (!mailbox || !token) return;
 
@@ -835,14 +882,25 @@ function MailboxDashboard() {
                           </span>
                           {item.share ? <Link2 size={15} /> : null}
                         </button>
-                        <button
-                          className="icon-button note-button"
-                          type="button"
-                          title="编辑备注"
-                          onClick={() => handleStartNoteEdit(item)}
-                        >
-                          <Pencil size={15} />
-                        </button>
+                        <span className="mailbox-tools">
+                          <button
+                            className="icon-button note-button"
+                            type="button"
+                            title="编辑备注"
+                            onClick={() => handleStartNoteEdit(item)}
+                          >
+                            <Pencil size={15} />
+                          </button>
+                          <button
+                            className="icon-button note-button danger"
+                            type="button"
+                            title="删除邮箱和邮件"
+                            onClick={() => void handleDeleteMailboxItem(item)}
+                            disabled={loading}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </span>
                       </>
                     )}
                   </div>

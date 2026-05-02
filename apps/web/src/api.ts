@@ -263,6 +263,13 @@ export async function updateAdminMailboxNote(address: string, adminToken: string
   return result.mailbox;
 }
 
+export async function deleteAdminMailbox(address: string, adminToken: string): Promise<void> {
+  await request(`/api/admin/mailboxes/${encodeURIComponent(address)}`, {
+    method: 'DELETE',
+    headers: adminHeader(adminToken)
+  });
+}
+
 export async function getAdminMessage(id: string, adminToken: string): Promise<MessageRecord> {
   const result = await request<{ success: true; message: MessageRecord }>(`/api/admin/messages/${id}`, {
     headers: adminHeader(adminToken)

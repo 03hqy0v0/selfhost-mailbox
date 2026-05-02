@@ -6,6 +6,7 @@ import path from 'node:path';
 import { appConfig } from './config.js';
 import {
   createMailbox,
+  deleteMailboxByAddress,
   deleteMailboxForAccess,
   deleteMessageForAccess,
   disableMailboxShare,
@@ -264,6 +265,18 @@ export async function createHttpServer(): Promise<FastifyInstance> {
     } catch (error: any) {
       return reply.code(400).send({ success: false, error: error.message });
     }
+  });
+
+  app.delete('/api/admin/mailboxes/:address', async (request, reply) => {
+    if (!requireAdminToken(request, reply)) return;
+
+    const { address } = request.params as { address: string };
+    const deleted = await deleteMailboxByAddress(normalizeAddress(address));
+    if (!deleted) {
+      return reply.code(404).send({ success: false, error: 'Mailbox not found' });
+    }
+
+    return { success: true };
   });
 
   app.get('/api/admin/messages/:id', async (request, reply) => {
