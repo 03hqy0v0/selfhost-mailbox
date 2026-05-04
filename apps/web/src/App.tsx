@@ -1,6 +1,8 @@
 import {
   Archive,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Copy,
   Download,
@@ -88,6 +90,7 @@ const MAILBOXES_STORAGE_KEY = 'selfhost-mailbox.mailboxes.v1';
 const ACTIVE_STORAGE_KEY = 'selfhost-mailbox.active.v1';
 const LEGACY_STORAGE_KEY = 'selfhost-mailbox.current';
 const ADMIN_TOKEN_STORAGE_KEY = 'selfhost-mailbox.admin-token.v1';
+const MAILBOX_PAGE_SIZE = 5;
 
 function isMailboxActive(mailbox: Mailbox): boolean {
   return !mailbox.expiresAt || new Date(mailbox.expiresAt).getTime() > Date.now();
@@ -272,6 +275,8 @@ function MailboxDashboard() {
   const [noteDraft, setNoteDraft] = useState('');
   const [noteSaving, setNoteSaving] = useState(false);
   const [query, setQuery] = useState('');
+  const [mailboxQuery, setMailboxQuery] = useState('');
+  const [mailboxPage, setMailboxPage] = useState(1);
   const [notice, setNotice] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
   const visibleMailboxes = useMemo<VisibleMailbox[]>(() => {
@@ -283,6 +288,32 @@ function MailboxDashboard() {
 
     return [...owned, ...adminOnly];
   }, [adminMailboxes, storedMailboxes]);
+
+  const filteredMailboxes = useMemo(() => {
+    const needle = mailboxQuery.trim().toLowerCase();
+    if (!needle) return visibleMailboxes;
+
+    return visibleMailboxes.filter((item) =>
+      [
+        item.mailbox.note,
+        item.mailbox.address,
+        item.mailbox.localPart,
+        item.mailbox.domain,
+        mailboxLifeLabel(item.mailbox),
+        item.source === 'admin' ? '服务器同步' : ''
+      ]
+        .join(' ')
+        .toLowerCase()
+        .includes(needle)
+    );
+  }, [mailboxQuery, visibleMailboxes]);
+
+  const mailboxPageCount = Math.max(1, Math.ceil(filteredMailboxes.length / MAILBOX_PAGE_SIZE));
+  const currentMailboxPage = Math.min(mailboxPage, mailboxPageCount);
+  const pagedMailboxes = useMemo(() => {
+    const start = (currentMailboxPage - 1) * MAILBOX_PAGE_SIZE;
+    return filteredMailboxes.slice(start, start + MAILBOX_PAGE_SIZE);
+  }, [currentMailboxPage, filteredMailboxes]);
 
   const activeStored = useMemo(
     () => storedMailboxes.find((item) => item.mailbox.address === activeAddress) || null,
@@ -424,6 +455,14 @@ function MailboxDashboard() {
   }, [config?.adminEnabled]);
 
   useEffect(() => {
+    setMailboxPage(1);
+  }, [mailboxQuery]);
+
+  useEffect(() => {
+    if (mailboxPage > mailboxPageCount) setMailboxPage(mailboxPageCount);
+  }, [mailboxPage, mailboxPageCount]);
+
+  useEffect(() => {
     if (storedMailboxes.length === 0) return;
 
     let cancelled = false;
@@ -470,6 +509,8 @@ function MailboxDashboard() {
       });
       const stored: StoredMailbox = { mailbox: next.mailbox, token: next.token };
       commitMailboxes(upsertMailbox(storedMailboxes, stored), next.mailbox.address);
+      setMailboxQuery('');
+      setMailboxPage(1);
       setMessages([]);
       setLocalPart('');
       showNotice('success', '邮箱已创建');
@@ -804,11 +845,32 @@ function MailboxDashboard() {
             <div className="panel-title">
               <Users size={18} />
               <h2>地址管理</h2>
-              <span className="count-pill">{visibleMailboxes.length}</span>
+              <span className="count-pill">
+                {filteredMailboxes.length}/{visibleMailboxes.length}
+              </span>
             </div>
 
+            <label className="mailbox-search">
+              <Search size={16} />
+              <input
+                value={mailboxQuery}
+                onChange={(event) => setMailboxQuery(event.target.value)}
+                placeholder="搜索邮箱或备注"
+              />
+              {mailboxQuery ? (
+                <button
+                  className="icon-button clear-search"
+                  type="button"
+                  title="清空搜索"
+                  onClick={() => setMailboxQuery('')}
+                >
+                  <X size={15} />
+                </button>
+              ) : null}
+            </label>
+
             <div className="mailbox-stack">
-              {visibleMailboxes.map((item) => {
+              {pagedMailboxes.map((item) => {
                 const isEditing = editingNoteAddress === item.mailbox.address;
                 return (
                   <div
@@ -908,6 +970,33 @@ function MailboxDashboard() {
               })}
 
               {visibleMailboxes.length === 0 ? <div className="empty compact">暂无邮箱</div> : null}
+              {visibleMailboxes.length > 0 && filteredMailboxes.length === 0 ? (
+                <div className="empty compact">没有匹配的邮箱</div>
+              ) : null}
+            </div>
+
+            <div className="mailbox-pagination">
+              <button
+                className="icon-button"
+                type="button"
+                title="上一页"
+                onClick={() => setMailboxPage((page) => Math.max(1, page - 1))}
+                disabled={currentMailboxPage <= 1}
+              >
+                <ChevronLeft size={17} />
+              </button>
+              <span>
+                第 {currentMailboxPage} / {mailboxPageCount} 页
+              </span>
+              <button
+                className="icon-button"
+                type="button"
+                title="下一页"
+                onClick={() => setMailboxPage((page) => Math.min(mailboxPageCount, page + 1))}
+                disabled={currentMailboxPage >= mailboxPageCount}
+              >
+                <ChevronRight size={17} />
+              </button>
             </div>
           </section>
 

@@ -314,6 +314,34 @@ select:focus {
   gap: 8px;
 }
 
+.mailbox-search {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  margin-bottom: 12px;
+  padding: 0 8px 0 11px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #667085;
+}
+
+.mailbox-search input {
+  min-height: 36px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.clear-search {
+  width: 30px;
+  min-height: 30px;
+  color: #667085;
+}
+
 .mailbox-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -394,6 +422,23 @@ select:focus {
 .mailbox-tools {
   display: flex;
   gap: 6px;
+}
+
+.mailbox-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(152, 162, 179, 0.22);
+}
+
+.mailbox-pagination span {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
 .note-editor {
