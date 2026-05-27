@@ -50,6 +50,7 @@ export const appConfig = {
   maxTtlHours: parseInteger('MAX_TTL_HOURS', 168),
   maxMessageBytes: parseInteger('MAX_MESSAGE_BYTES', 25 * 1024 * 1024),
   adminTokenHash: optionalTokenHash('ADMIN_TOKEN'),
+  apiTokenHash: optionalTokenHash('API_TOKEN'),
   webDist: process.env.WEB_DIST,
   smtpTlsKeyPath: optionalReadableFile('SMTP_TLS_KEY_PATH'),
   smtpTlsCertPath: optionalReadableFile('SMTP_TLS_CERT_PATH')

@@ -4,6 +4,7 @@ export interface AppConfig {
   maxTtlHours: number;
   publicBaseUrl: string;
   adminEnabled: boolean;
+  apiEnabled: boolean;
 }
 
 export interface Mailbox {

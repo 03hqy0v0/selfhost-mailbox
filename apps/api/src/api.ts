@@ -13,6 +13,7 @@ import {
   enableMailboxShare,
   getAttachmentForAccess,
   getAttachmentForShare,
+  getActiveMailboxByAddress,
   getAttachmentById,
   getMailboxByAddress,
   getMailboxForAccess,
@@ -25,10 +26,12 @@ import {
   listAttachmentsForShare,
   listMailboxes,
   listMessages,
+  listMessagesWithBody,
   updateMailboxNoteForAccess,
   updateMailboxNoteForAdmin,
   updateMailboxRetention
 } from './db.js';
+import type { AttachmentRecord, MessageRecord } from './db.js';
 import {
   createAccessToken,
   hashToken,
@@ -198,6 +201,111 @@ function resolveMailboxAddress(body: CreateMailboxBody): { address: string; loca
   };
 }
 
+function apiTokenFromRequest(request: FastifyRequest): string | null {
+  const auth = singleHeaderValue(request.headers.authorization);
+  if (auth) {
+    const bearer = auth.match(/^Bearer\s+(.+)$/i);
+    if (bearer) return bearer[1].trim();
+  }
+
+  return singleHeaderValue(request.headers['x-api-token']);
+}
+
+function requireApiToken(request: FastifyRequest, reply: FastifyReply): boolean {
+  if (!appConfig.apiTokenHash) {
+    void reply.code(503).send({ success: false, error: 'API token is not configured' });
+    return false;
+  }
+
+  const token = apiTokenFromRequest(request);
+  if (!token || hashToken(token) !== appConfig.apiTokenHash) {
+    void reply.code(401).send({ success: false, error: 'Invalid API token' });
+    return false;
+  }
+
+  return true;
+}
+
+function pickRandomDomain(): string {
+  const domains = appConfig.emailDomains;
+  if (domains.length === 0) return '';
+  return domains[Math.floor(Math.random() * domains.length)];
+}
+
+function resolveApiMailboxAddress(body: CreateMailboxBody): { address: string; localPart: string; domain: string } {
+  const requestedDomain = body.domain ? normalizeDomain(body.domain) : '';
+
+  if (body.address && body.address.trim()) {
+    const input = normalizeAddress(body.address);
+    const parts = input.includes('@')
+      ? splitAddress(input)
+      : { localPart: input, domain: requestedDomain || pickRandomDomain() };
+
+    if (!parts || !isAllowedDomain(parts.domain)) {
+      throw new Error('Mailbox domain is not allowed');
+    }
+
+    const address = `${parts.localPart}@${parts.domain}`;
+    if (!isValidLocalPart(parts.localPart) || !isValidAddress(address)) {
+      throw new Error('Invalid mailbox address');
+    }
+
+    return { address, localPart: parts.localPart, domain: parts.domain };
+  }
+
+  const domain = requestedDomain || pickRandomDomain();
+  if (!domain || !isAllowedDomain(domain)) {
+    throw new Error('Selected domain is not available');
+  }
+
+  const localPart = randomLocalPart();
+  return { address: `${localPart}@${domain}`, localPart, domain };
+}
+
+function parseLimit(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return undefined;
+  return Math.min(parsed, 200);
+}
+
+function parseBoolFlag(value: unknown): boolean {
+  return value === true || value === 'true' || value === '1';
+}
+
+function serializeApiAttachment(attachment: AttachmentRecord, baseUrl: string): Record<string, unknown> {
+  return {
+    id: attachment.id,
+    filename: attachment.filename,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    downloadUrl: `${baseUrl}/api/v1/attachments/${attachment.id}/download`
+  };
+}
+
+function serializeApiMessage(
+  message: MessageRecord,
+  attachments?: AttachmentRecord[] | null,
+  baseUrl?: string
+): Record<string, unknown> {
+  return {
+    id: message.id,
+    from: message.fromAddress,
+    fromName: message.fromName,
+    to: message.toAddress,
+    subject: message.subject,
+    text: message.textBody,
+    html: message.htmlBody,
+    receivedAt: message.receivedAt,
+    isRead: message.isRead,
+    sizeBytes: message.sizeBytes,
+    hasAttachments: message.hasAttachments,
+    ...(attachments
+      ? { attachments: attachments.map((attachment) => serializeApiAttachment(attachment, baseUrl || '')) }
+      : {})
+  };
+}
+
 export async function createHttpServer(): Promise<FastifyInstance> {
   const app = fastify({
     logger: true,
@@ -207,7 +315,7 @@ export async function createHttpServer(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: appConfig.corsOrigin === '*' ? true : appConfig.corsOrigin,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'X-Mailbox-Token', 'X-Admin-Token']
+    allowedHeaders: ['Content-Type', 'X-Mailbox-Token', 'X-Admin-Token', 'X-API-Token', 'Authorization']
   });
 
   app.get('/api/health', async () => ({
@@ -222,7 +330,8 @@ export async function createHttpServer(): Promise<FastifyInstance> {
       defaultTtlHours: appConfig.defaultTtlHours,
       maxTtlHours: appConfig.maxTtlHours,
       publicBaseUrl: appConfig.publicBaseUrl,
-      adminEnabled: Boolean(appConfig.adminTokenHash)
+      adminEnabled: Boolean(appConfig.adminTokenHash),
+      apiEnabled: Boolean(appConfig.apiTokenHash)
     }
   }));
 
@@ -559,6 +668,141 @@ export async function createHttpServer(): Promise<FastifyInstance> {
 
     const { id } = request.params as { id: string };
     const attachment = await getAttachmentForAccess(id, tokenHash);
+    if (!attachment) {
+      return reply.code(404).send({ success: false, error: 'Attachment not found' });
+    }
+
+    reply.header('Content-Type', attachment.mimeType);
+    reply.header('Content-Length', attachment.content.length);
+    reply.header(
+      'Content-Disposition',
+      `attachment; filename="${safeFilename(attachment.filename)}"; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`
+    );
+
+    return reply.send(attachment.content);
+  });
+
+  // Developer API (v1): a simplified surface for programmatic use.
+  // Authenticated with a single global API token via `Authorization: Bearer <API_TOKEN>`.
+  app.post('/api/v1/mailboxes', async (request, reply) => {
+    if (!requireApiToken(request, reply)) return;
+
+    try {
+      const body = (request.body || {}) as CreateMailboxBody;
+      const ttlHours = activeTtlHours(body);
+      const resolved = resolveApiMailboxAddress(body);
+      const token = createAccessToken();
+      const mailbox = await createMailbox({
+        ...resolved,
+        ttlHours,
+        tokenHash: hashToken(token)
+      });
+
+      return reply.code(201).send({
+        success: true,
+        address: mailbox.address,
+        localPart: mailbox.localPart,
+        domain: mailbox.domain,
+        createdAt: mailbox.createdAt,
+        expiresAt: mailbox.expiresAt,
+        token
+      });
+    } catch (error: any) {
+      const duplicate = error?.code === '23505';
+      return reply.code(duplicate ? 409 : 400).send({
+        success: false,
+        error: duplicate ? 'Mailbox already exists' : error.message
+      });
+    }
+  });
+
+  app.get('/api/v1/mailboxes/:address', async (request, reply) => {
+    if (!requireApiToken(request, reply)) return;
+
+    const { address } = request.params as { address: string };
+    const mailbox = await getActiveMailboxByAddress(normalizeAddress(address));
+    if (!mailbox) {
+      return reply.code(404).send({ success: false, error: 'Mailbox not found' });
+    }
+
+    return { success: true, mailbox };
+  });
+
+  app.get('/api/v1/mailboxes/:address/messages', async (request, reply) => {
+    if (!requireApiToken(request, reply)) return;
+
+    const { address } = request.params as { address: string };
+    const query = (request.query || {}) as { limit?: string; unread?: string };
+    const mailbox = await getActiveMailboxByAddress(normalizeAddress(address));
+    if (!mailbox) {
+      return reply.code(404).send({ success: false, error: 'Mailbox not found' });
+    }
+
+    const messages = await listMessagesWithBody(mailbox.id, {
+      limit: parseLimit(query.limit),
+      unreadOnly: parseBoolFlag(query.unread)
+    });
+
+    return {
+      success: true,
+      address: mailbox.address,
+      count: messages.length,
+      messages: messages.map((message) => serializeApiMessage(message))
+    };
+  });
+
+  app.get('/api/v1/mailboxes/:address/latest', async (request, reply) => {
+    if (!requireApiToken(request, reply)) return;
+
+    const { address } = request.params as { address: string };
+    const query = (request.query || {}) as { unread?: string };
+    const mailbox = await getActiveMailboxByAddress(normalizeAddress(address));
+    if (!mailbox) {
+      return reply.code(404).send({ success: false, error: 'Mailbox not found' });
+    }
+
+    const messages = await listMessagesWithBody(mailbox.id, {
+      limit: 1,
+      unreadOnly: parseBoolFlag(query.unread)
+    });
+    const latest = messages[0];
+    if (!latest) {
+      return { success: true, message: null };
+    }
+
+    const attachments = await listAttachmentsByMessageId(latest.id);
+    return {
+      success: true,
+      message: serializeApiMessage(latest, attachments, publicBaseUrlForRequest(request))
+    };
+  });
+
+  app.get('/api/v1/mailboxes/:address/messages/:id', async (request, reply) => {
+    if (!requireApiToken(request, reply)) return;
+
+    const { address, id } = request.params as { address: string; id: string };
+    const mailbox = await getActiveMailboxByAddress(normalizeAddress(address));
+    if (!mailbox) {
+      return reply.code(404).send({ success: false, error: 'Mailbox not found' });
+    }
+
+    const message = await getMessageById(id);
+    if (!message || message.mailboxId !== mailbox.id) {
+      return reply.code(404).send({ success: false, error: 'Message not found' });
+    }
+
+    const attachments = await listAttachmentsByMessageId(id);
+    return {
+      success: true,
+      message: serializeApiMessage(message, attachments, publicBaseUrlForRequest(request))
+    };
+  });
+
+  app.get('/api/v1/attachments/:id/download', async (request, reply) => {
+    if (!requireApiToken(request, reply)) return;
+
+    const { id } = request.params as { id: string };
+    const attachment = await getAttachmentById(id);
     if (!attachment) {
       return reply.code(404).send({ success: false, error: 'Attachment not found' });
     }

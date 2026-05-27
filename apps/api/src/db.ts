@@ -521,6 +521,46 @@ export async function listMessages(mailboxId: string): Promise<MessageListItem[]
   return result.rows.map(mapMessage);
 }
 
+export async function listMessagesWithBody(
+  mailboxId: string,
+  options: { limit?: number; unreadOnly?: boolean } = {}
+): Promise<MessageRecord[]> {
+  const params: unknown[] = [mailboxId];
+  let where = 'mailbox_id = $1';
+  if (options.unreadOnly) {
+    where += ' AND is_read = false';
+  }
+
+  let sql = `
+    SELECT
+      id,
+      mailbox_id AS "mailboxId",
+      from_address AS "fromAddress",
+      from_name AS "fromName",
+      to_address AS "toAddress",
+      subject,
+      left(text_body, 240) AS preview,
+      text_body AS "textBody",
+      html_body AS "htmlBody",
+      message_id AS "messageId",
+      size_bytes AS "sizeBytes",
+      received_at AS "receivedAt",
+      has_attachments AS "hasAttachments",
+      is_read AS "isRead"
+    FROM messages
+    WHERE ${where}
+    ORDER BY received_at DESC
+  `;
+
+  if (options.limit) {
+    params.push(options.limit);
+    sql += ` LIMIT $${params.length}`;
+  }
+
+  const result = await pool.query(sql, params);
+  return result.rows.map(mapMessage);
+}
+
 export async function getMessageForAccess(messageId: string, tokenHash: string): Promise<MessageRecord | null> {
   const result = await pool.query(
     `

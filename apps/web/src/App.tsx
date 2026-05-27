@@ -1,9 +1,11 @@
 import {
+  ArrowLeft,
   Archive,
   Check,
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Code2,
   Copy,
   Download,
   ExternalLink,
@@ -21,7 +23,7 @@ import {
   Users,
   X
 } from 'lucide-react';
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   type AppConfig,
   type AttachmentRecord,
@@ -246,7 +248,10 @@ async function copyToClipboard(value: string): Promise<void> {
 }
 
 export default function App() {
-  const shareToken = useMemo(() => shareTokenFromPath(), []);
+  const path = window.location.pathname;
+  if (path === '/docs' || path.startsWith('/docs/')) return <ApiDocs />;
+
+  const shareToken = shareTokenFromPath();
   if (shareToken) return <SharedInbox shareToken={shareToken} />;
 
   return <MailboxDashboard />;
@@ -624,23 +629,51 @@ function MailboxDashboard() {
     }
   }
 
+  async function createAndStoreShare(): Promise<ShareInfo> {
+    if (!mailbox || !token) throw new Error('当前邮箱不能生成分享链接');
+
+    const result = await createMailboxShare(mailbox.address, token);
+    const share = normalizeShare(result.share);
+    const nextStored: StoredMailbox = {
+      mailbox: result.mailbox,
+      token,
+      share
+    };
+    commitMailboxes(upsertMailbox(storedMailboxes, nextStored), result.mailbox.address);
+    return share;
+  }
+
   async function handleCreateShare() {
     if (!mailbox || !token) return;
 
     setShareLoading(true);
     setNotice(null);
     try {
-      const result = await createMailboxShare(mailbox.address, token);
-      const nextStored: StoredMailbox = {
-        mailbox: result.mailbox,
-        token,
-        share: normalizeShare(result.share)
-      };
-      commitMailboxes(upsertMailbox(storedMailboxes, nextStored), result.mailbox.address);
-      const copied = await copyText(currentShareUrl(result.share.token), '分享链接', false);
+      const share = await createAndStoreShare();
+      const copied = await copyText(share.url, '分享链接', false);
       if (!copied) showNotice('success', '分享链接已生成，可点击复制按钮复制');
     } catch (err) {
       showNotice('error', err instanceof Error ? err.message : '分享失败');
+    } finally {
+      setShareLoading(false);
+    }
+  }
+
+  async function handleCopyAddressAndShare() {
+    if (!mailbox || !token) return;
+
+    setShareLoading(true);
+    setNotice(null);
+    try {
+      const share = activeShare || (await createAndStoreShare());
+      const payload = `${mailbox.address}----${share.url}`;
+      await copyToClipboard(payload);
+      showNotice('success', '邮箱和接码链接已复制');
+    } catch (err) {
+      showNotice(
+        'error',
+        err instanceof Error ? `复制失败：${err.message}` : '复制失败，请手动复制'
+      );
     } finally {
       setShareLoading(false);
     }
@@ -743,6 +776,7 @@ function MailboxDashboard() {
         messageCount={messages.length}
         unreadCount={unreadCount}
         loading={loading}
+        docsLink
         onRefresh={refreshMessages}
         onDelete={token ? handleDeleteMailbox : undefined}
       />
@@ -1021,6 +1055,16 @@ function MailboxDashboard() {
                 </button>
               </div>
 
+              <button
+                className="secondary stretch"
+                type="button"
+                onClick={handleCopyAddressAndShare}
+                disabled={shareLoading || !token}
+              >
+                <Copy size={16} />
+                复制邮箱和接码链接
+              </button>
+
               {!token ? <p className="panel-hint">这是服务器同步邮箱，可查看历史邮件；生成分享和删除需要本浏览器保存过该邮箱 token。</p> : null}
 
               {mailbox.expiresAt && token ? (
@@ -1211,6 +1255,7 @@ function Topbar({
   unreadCount,
   loading,
   readonly,
+  docsLink,
   onRefresh,
   onDelete
 }: {
@@ -1219,6 +1264,7 @@ function Topbar({
   unreadCount: number;
   loading: boolean;
   readonly?: boolean;
+  docsLink?: boolean;
   onRefresh: () => void;
   onDelete?: () => void;
 }) {
@@ -1237,6 +1283,11 @@ function Topbar({
         {!readonly ? <span>{unreadCount} 未读</span> : null}
       </div>
       <div className="toolbar-actions">
+        {docsLink ? (
+          <a className="icon-button" href="/docs" title="API 文档">
+            <Code2 size={18} />
+          </a>
+        ) : null}
         <button className="icon-button" onClick={onRefresh} disabled={!mailbox || loading} title="刷新">
           <RefreshCw size={18} />
         </button>
@@ -1328,5 +1379,464 @@ function Reader({ selected, attachments, loading, canDelete, onDelete, onDownloa
 
       {!loading && !selected ? <div className="empty reader-empty">选择一封邮件查看</div> : null}
     </section>
+  );
+}
+
+function resolveDocsBase(config: AppConfig | null): string {
+  const configured = (config?.publicBaseUrl || '').replace(/\/+$/, '');
+  if (/^https?:\/\//.test(configured) && !/localhost|127\.0\.0\.1|0\.0\.0\.0/.test(configured)) {
+    return configured;
+  }
+
+  return window.location.origin.replace(/\/+$/, '');
+}
+
+function DocCode({ code, label }: { code: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    try {
+      await copyToClipboard(code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* ignore copy failures in docs */
+    }
+  }
+
+  return (
+    <div className="doc-code">
+      <div className="doc-code-bar">
+        <span className="doc-code-label">{label || ''}</span>
+        <button className="doc-copy" type="button" onClick={handleCopy}>
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {copied ? '已复制' : '复制'}
+        </button>
+      </div>
+      <pre>{code}</pre>
+    </div>
+  );
+}
+
+function DocEndpoint({ method, path, children }: { method: string; path: string; children: ReactNode }) {
+  return (
+    <div className="doc-endpoint">
+      <div className="doc-endpoint-head">
+        <span className={`doc-method ${method.toLowerCase()}`}>{method}</span>
+        <code className="doc-path">{path}</code>
+      </div>
+      <div className="doc-endpoint-body">{children}</div>
+    </div>
+  );
+}
+
+function ApiDocs() {
+  const [config, setConfig] = useState<AppConfig | null>(null);
+
+  useEffect(() => {
+    void getConfig()
+      .then(setConfig)
+      .catch(() => setConfig(null));
+  }, []);
+
+  const base = resolveDocsBase(config);
+  const sampleDomain = config?.emailDomains[0] || 'example.com';
+  const sampleLocal = 'k7f2x9q1';
+  const sampleAddress = `${sampleLocal}@${sampleDomain}`;
+  const ttlNote = config ? `${config.defaultTtlHours} 小时（最长 ${config.maxTtlHours} 小时）` : '配置的默认有效期';
+
+  const createRandomReq = `curl -X POST ${base}/api/v1/mailboxes \\
+  -H "Authorization: Bearer $API_TOKEN"`;
+
+  const createRandomRes = `{
+  "success": true,
+  "address": "${sampleAddress}",
+  "localPart": "${sampleLocal}",
+  "domain": "${sampleDomain}",
+  "createdAt": "2026-05-27T08:00:00.000Z",
+  "expiresAt": "2026-05-28T08:00:00.000Z",
+  "token": "Yx3k...  // 该邮箱独立 token，用 API_TOKEN 调用时可忽略"
+}`;
+
+  const createCustomReq = `curl -X POST ${base}/api/v1/mailboxes \\
+  -H "Authorization: Bearer $API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"address": "login-test", "domain": "${sampleDomain}", "permanent": true}'`;
+
+  const listReq = `curl ${base}/api/v1/mailboxes/${sampleAddress}/messages \\
+  -H "Authorization: Bearer $API_TOKEN"`;
+
+  const listRes = `{
+  "success": true,
+  "address": "${sampleAddress}",
+  "count": 1,
+  "messages": [
+    {
+      "id": "8f1c-...",
+      "from": "no-reply@github.com",
+      "fromName": "GitHub",
+      "to": "${sampleAddress}",
+      "subject": "你的验证码是 123456",
+      "text": "你的验证码是 123456，10 分钟内有效。",
+      "html": "<p>你的验证码是 <b>123456</b></p>",
+      "receivedAt": "2026-05-27T08:01:12.000Z",
+      "isRead": false,
+      "sizeBytes": 2048,
+      "hasAttachments": false
+    }
+  ]
+}`;
+
+  const latestReq = `curl "${base}/api/v1/mailboxes/${sampleAddress}/latest?unread=true" \\
+  -H "Authorization: Bearer $API_TOKEN"`;
+
+  const latestRes = `{
+  "success": true,
+  "message": {
+    "id": "8f1c-...",
+    "from": "no-reply@github.com",
+    "subject": "你的验证码是 123456",
+    "text": "你的验证码是 123456，10 分钟内有效。",
+    "html": "<p>你的验证码是 <b>123456</b></p>",
+    "receivedAt": "2026-05-27T08:01:12.000Z",
+    "hasAttachments": false,
+    "attachments": []
+  }
+}`;
+
+  const singleReq = `curl ${base}/api/v1/mailboxes/${sampleAddress}/messages/8f1c-... \\
+  -H "Authorization: Bearer $API_TOKEN"`;
+
+  const attachmentReq = `curl ${base}/api/v1/attachments/3a9d-.../download \\
+  -H "Authorization: Bearer $API_TOKEN" -OJ`;
+
+  const quickStart = `#!/usr/bin/env bash
+set -euo pipefail
+BASE="${base}"
+API_TOKEN="你的 API_TOKEN"
+
+# 1) 随机创建邮箱（随机域名 + 随机前缀），取出地址
+ADDRESS=$(curl -s -X POST "$BASE/api/v1/mailboxes" \\
+  -H "Authorization: Bearer $API_TOKEN" | jq -r .address)
+echo "新邮箱：$ADDRESS"
+
+# 2) 轮询最新一封未读邮件，直到收到为止
+while :; do
+  TEXT=$(curl -s "$BASE/api/v1/mailboxes/$ADDRESS/latest?unread=true" \\
+    -H "Authorization: Bearer $API_TOKEN" | jq -r '.message.text // empty')
+  [ -n "$TEXT" ] && break
+  sleep 3
+done
+
+# 3) 从正文里抓 6 位验证码
+echo "$TEXT" | grep -oE '[0-9]{6}' | head -n1`;
+
+  return (
+    <main className="app-shell docs">
+      <section className="topbar">
+        <div>
+          <div className="brand">
+            <Code2 size={22} />
+            <span>API 文档</span>
+          </div>
+          <p className="muted">Selfhost Mailbox · 用程序创建邮箱、收取邮件并拿到正文</p>
+        </div>
+        <div />
+        <div className="toolbar-actions">
+          <a className="secondary" href="/">
+            <ArrowLeft size={16} />
+            返回收件箱
+          </a>
+        </div>
+      </section>
+
+      <div className="docs-body">
+        <section className="panel doc-section">
+          <h2>概览</h2>
+          <p>
+            这是一套为脚本 / 程序设计的简化接口，用一个全局密钥即可：随机或指定地创建邮箱、轮询收件并直接拿到邮件正文。
+            除附件下载外，所有响应均为 JSON。
+          </p>
+          <ul className="doc-list">
+            <li>
+              Base URL：<code>{base}</code>
+            </li>
+            <li>
+              所有接口都以 <code>/api/v1</code> 开头；创建邮箱用 <code>POST</code> + JSON 请求体，其余为 <code>GET</code>。
+            </li>
+          </ul>
+        </section>
+
+        <section className="panel doc-section">
+          <h2>鉴权</h2>
+          <p>
+            在服务器 <code>.env</code> 里设置一个长随机字符串 <code>API_TOKEN</code> 并重启，然后每个请求都带上：
+          </p>
+          <DocCode code={'Authorization: Bearer <你的 API_TOKEN>'} />
+          <p>
+            也可以改用请求头 <code>X-API-Token: &lt;你的 API_TOKEN&gt;</code>。
+          </p>
+          {config && !config.apiEnabled ? (
+            <div className="doc-warn">
+              服务器尚未设置 <code>API_TOKEN</code>，v1 接口当前会返回 <code>503</code>。请在 .env 配置后重启服务。
+            </div>
+          ) : null}
+          <div className="doc-warn subtle">
+            该密钥可以创建并读取本服务器上的<strong>所有</strong>邮箱，请妥善保管，仅在受信任的后端使用。
+          </div>
+        </section>
+
+        <section className="panel doc-section">
+          <h2>快速开始</h2>
+          <p>
+            下面这段脚本完成「随机建邮箱 → 轮询 → 取验证码」的完整流程（需要 <code>curl</code> 和 <code>jq</code>）：
+          </p>
+          <DocCode label="bash" code={quickStart} />
+        </section>
+
+        <section className="panel doc-section">
+          <h2>接口</h2>
+
+          <DocEndpoint method="POST" path="/api/v1/mailboxes">
+            <p>
+              创建邮箱。<strong>不带请求体时随机选一个已配置域名 + 随机前缀</strong>，并在响应里返回创建出的 <code>address</code>；
+              也可以指定。默认有效期为 {ttlNote}。
+            </p>
+            <table className="doc-table">
+              <thead>
+                <tr>
+                  <th>字段</th>
+                  <th>类型</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <code>address</code>
+                  </td>
+                  <td>string?</td>
+                  <td>邮箱前缀或完整地址；省略则随机生成。</td>
+                </tr>
+                <tr>
+                  <td>
+                    <code>domain</code>
+                  </td>
+                  <td>string?</td>
+                  <td>指定域名；省略则随机挑一个已配置域名。</td>
+                </tr>
+                <tr>
+                  <td>
+                    <code>ttlHours</code>
+                  </td>
+                  <td>number?</td>
+                  <td>有效期小时数；省略用默认值。</td>
+                </tr>
+                <tr>
+                  <td>
+                    <code>permanent</code>
+                  </td>
+                  <td>boolean?</td>
+                  <td>
+                    <code>true</code> 表示长期保存、不过期。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <DocCode label="随机创建" code={createRandomReq} />
+            <DocCode label="响应 201" code={createRandomRes} />
+            <DocCode label="指定地址 / 长期保存" code={createCustomReq} />
+          </DocEndpoint>
+
+          <DocEndpoint method="GET" path="/api/v1/mailboxes/:address/messages">
+            <p>
+              列出邮箱里的邮件，<strong>直接返回正文</strong>（<code>text</code> 与 <code>html</code>），按收件时间倒序。
+            </p>
+            <table className="doc-table">
+              <thead>
+                <tr>
+                  <th>查询参数</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <code>limit</code>
+                  </td>
+                  <td>返回条数上限，1–200。</td>
+                </tr>
+                <tr>
+                  <td>
+                    <code>unread</code>
+                  </td>
+                  <td>
+                    <code>true</code> 时只返回未读邮件。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <DocCode label="请求" code={listReq} />
+            <DocCode label="响应" code={listRes} />
+          </DocEndpoint>
+
+          <DocEndpoint method="GET" path="/api/v1/mailboxes/:address/latest">
+            <p>
+              取最新一封邮件并附带附件信息，最适合轮询验证码。没有邮件时返回{' '}
+              <code>{'{ "success": true, "message": null }'}</code>。支持 <code>unread=true</code>。
+            </p>
+            <DocCode label="请求" code={latestReq} />
+            <DocCode label="响应" code={latestRes} />
+          </DocEndpoint>
+
+          <DocEndpoint method="GET" path="/api/v1/mailboxes/:address/messages/:id">
+            <p>按邮件 ID 取单封完整内容与附件列表。</p>
+            <DocCode label="请求" code={singleReq} />
+          </DocEndpoint>
+
+          <DocEndpoint method="GET" path="/api/v1/mailboxes/:address">
+            <p>查询邮箱本身信息：创建时间、过期时间、备注等。</p>
+          </DocEndpoint>
+
+          <DocEndpoint method="GET" path="/api/v1/attachments/:id/download">
+            <p>
+              下载附件原始文件。附件 ID 来自单封 / latest 响应里的 <code>attachments[].id</code>，每个附件也带有现成的{' '}
+              <code>downloadUrl</code>。
+            </p>
+            <DocCode label="请求" code={attachmentReq} />
+          </DocEndpoint>
+        </section>
+
+        <section className="panel doc-section">
+          <h2>邮件对象字段</h2>
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>类型</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <code>id</code>
+                </td>
+                <td>string</td>
+                <td>邮件 ID，用于单封查询。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>from</code> / <code>fromName</code>
+                </td>
+                <td>string</td>
+                <td>发件人地址 / 显示名。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>to</code>
+                </td>
+                <td>string</td>
+                <td>收件地址。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>subject</code>
+                </td>
+                <td>string</td>
+                <td>主题。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>text</code> / <code>html</code>
+                </td>
+                <td>string</td>
+                <td>纯文本 / HTML 正文，可能为空字符串。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>receivedAt</code>
+                </td>
+                <td>string</td>
+                <td>收件时间，ISO 8601。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>isRead</code>
+                </td>
+                <td>boolean</td>
+                <td>是否已读（API 读取不会改变已读状态）。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>hasAttachments</code>
+                </td>
+                <td>boolean</td>
+                <td>是否有附件。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>attachments</code>
+                </td>
+                <td>array</td>
+                <td>
+                  仅 latest / 单封返回；每项含 <code>id</code>、<code>filename</code>、<code>mimeType</code>、
+                  <code>sizeBytes</code>、<code>downloadUrl</code>。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section className="panel doc-section">
+          <h2>错误响应</h2>
+          <p>
+            出错时返回 <code>{'{ "success": false, "error": "..." }'}</code>，并带对应状态码：
+          </p>
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>状态码</th>
+                <th>含义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <code>401</code>
+                </td>
+                <td>缺少或错误的 API 密钥。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>404</code>
+                </td>
+                <td>邮箱 / 邮件 / 附件不存在或已过期。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>409</code>
+                </td>
+                <td>邮箱地址已存在。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>400</code>
+                </td>
+                <td>地址或域名不合法。</td>
+              </tr>
+              <tr>
+                <td>
+                  <code>503</code>
+                </td>
+                <td>
+                  服务器未配置 <code>API_TOKEN</code>。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+    </main>
   );
 }

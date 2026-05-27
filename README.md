@@ -66,6 +66,7 @@ npm run dev:web
 EMAIL_DOMAINS=example.com,example.net
 PUBLIC_BASE_URL=https://mail.example.com
 ADMIN_TOKEN=replace-with-a-long-random-secret
+API_TOKEN=replace-with-a-long-random-secret
 SMTP_PUBLISH_PORT=25
 HTTP_PUBLISH_PORT=3000
 POSTGRES_USER=mailbox
@@ -163,3 +164,26 @@ X-Admin-Token: <ADMIN_TOKEN>
 ```
 
 `ADMIN_TOKEN` 适合设置成一段长随机字符串。它不会暴露给分享页；只有输入该密钥的管理界面可以跨浏览器加载服务器里的历史邮箱。
+
+## 程序调用 API（v1）
+
+面向脚本/自动化的简化接口，用一个全局密钥即可创建邮箱、轮询收件并直接拿到正文。先在 `.env` 设置 `API_TOKEN` 并重启，然后每个请求带上 `Authorization: Bearer <API_TOKEN>`（或 `X-API-Token` 头）。完整文档在网站的 `/docs` 页面（顶栏 `</>` 图标）。
+
+- `POST /api/v1/mailboxes`：创建邮箱。不带请求体时随机选域名 + 随机前缀，返回创建出的 `address`；也可传 `address`、`domain`、`ttlHours`、`permanent`。
+- `GET /api/v1/mailboxes/:address`：邮箱信息。
+- `GET /api/v1/mailboxes/:address/messages`：列出邮件并直接返回正文（`text`/`html`），支持 `?limit=`、`?unread=true`。
+- `GET /api/v1/mailboxes/:address/latest`：取最新一封（含附件信息），适合轮询验证码，支持 `?unread=true`。
+- `GET /api/v1/mailboxes/:address/messages/:id`：单封完整内容。
+- `GET /api/v1/attachments/:id/download`：下载附件。
+
+```bash
+# 随机建一个邮箱并取地址
+ADDRESS=$(curl -s -X POST https://mail.example.com/api/v1/mailboxes \
+  -H "Authorization: Bearer $API_TOKEN" | jq -r .address)
+
+# 轮询最新未读邮件的正文
+curl -s "https://mail.example.com/api/v1/mailboxes/$ADDRESS/latest?unread=true" \
+  -H "Authorization: Bearer $API_TOKEN" | jq -r '.message.text // empty'
+```
+
+注意：`API_TOKEN` 可访问本服务器上所有邮箱，请妥善保管，仅在受信任的后端使用。
